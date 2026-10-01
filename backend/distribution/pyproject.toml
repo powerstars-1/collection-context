@@ -20,7 +20,7 @@ where = ["src"]
 include = ["collection_context*"]
 
 [tool.setuptools.package-data]
-"collection_context.interfaces" = ["assets/*.html", "assets/*.css", "assets/*.js"]
+"collection_context.interfaces" = ["assets/*.html", "assets/*.css", "assets/*.js", "assets/*.txt"]
 
 [project.optional-dependencies]
 mcp = ["mcp==2.2.0"]

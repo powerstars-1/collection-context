@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from collection_context.application.contracts import ContextError
@@ -90,6 +92,12 @@ def test_ui_assets_are_offline_and_never_render_source_as_html():
 
     root = files("collection_context.interfaces").joinpath("assets")
     source = root.joinpath("app.js").read_text()
+    # React bundles its internal DOM renderer; guard our authored sources instead.
+    authored = Path(__file__).parents[2] / "frontend/src"
+    source = "\n".join(
+        path.read_text() for path in authored.rglob("*")
+        if path.suffix in {".js", ".jsx", ".tsx"}
+    )
     assert "innerHTML" not in source and "localStorage" not in source and "eval(" not in source
     assert ".textContent" in source
     html = root.joinpath("index.html").read_text()

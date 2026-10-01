@@ -1,0 +1,11 @@
+/* Product state and evidence adapters only; original shell/components stay intact. */
+body { font-family: ui-sans-serif, -apple-system, 'PingFang SC', 'Hiragino Sans GB', sans-serif; }
+[hidden] { display: none !important; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--color-zinc-500); outline-offset: 3px;
+}
+[data-management-root] p { line-height: 1.75; }
+[data-management-root] fieldset:disabled { opacity: .6; }
+[data-management-root] input[type=checkbox] { accent-color: var(--color-zinc-900); }
+pre { overflow-wrap: anywhere; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }

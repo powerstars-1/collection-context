@@ -277,6 +277,8 @@ def create_app(
     @app.get("/")
     @app.get("/connect")
     @app.get("/activity")
+    @app.get("/settings")
+    @app.get("/access")
     async def shell():
         return Response(
             files("collection_context.interfaces").joinpath("assets/index.html").read_bytes(),
