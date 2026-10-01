@@ -310,6 +310,25 @@ def test_single_confirmation_forwards_catalog_id_but_never_changes_four_permissi
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("picker_open", [False, True])
+def test_cancel_confirmation_stays_with_picker_and_preserves_selection(tmp_path, picker_open):
+    window, calls, parameters = ui_fixture(tmp_path)
+    picker = object() if picker_open else None
+    window.install_window = picker
+    observed = []
+
+    def cancel(*args, **kwargs):
+        observed.append(kwargs["parent"])
+        return False
+
+    window.messagebox.askyesno = cancel
+    window._confirm_installation(ARTIFACT, parameters, 3)
+    assert observed == [picker if picker_open else window.root]
+    assert window.install_window is picker and window._install_generation == 3
+    assert not calls and not list(tmp_path.iterdir())
+    assert [variable.get() for variable in window.permission_variables] == [False] * 4
+
+
 def test_installing_disables_selection_and_start_and_keeps_stop_available(tmp_path):
     window, _, _ = ui_fixture(tmp_path)
     window.installation.active = True

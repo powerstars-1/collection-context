@@ -539,6 +539,16 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
                 + " / "
                 + str(item.get("host_arch", "未提供")),
                 "下载体积：" + volume,
+                *(
+                    (
+                        f"随包归档：{item['archive_bytes']:,} 字节",
+                        f"展开体积：{item['payload_bytes']:,} 字节",
+                    )
+                    if item.get("delivery") == "bundled"
+                    and type(item.get("archive_bytes")) is int
+                    and type(item.get("payload_bytes")) is int
+                    else ()
+                ),
                 "交付方式："
                 + (
                     "随包携带，无网络下载；来源地址是上游源码"
@@ -818,36 +828,59 @@ class _DesktopWindow:
         dialog = tk.Toplevel(self.root)
         self.install_window = dialog
         dialog.title("安装运行组件 · 单项确认")
-        dialog.geometry("730x580")
+        dialog.geometry("730x660")
         frame = ttk.Frame(dialog, padding=20)
         frame.pack(fill="both", expand=True)
         ttk.Label(frame, text="固定产品清单 · 不自动下载", font=("TkDefaultFont", 16)).pack(anchor="w")
-        text = tk.Text(frame, wrap="word", height=18, font=("TkDefaultFont", 11))
-        text.pack(fill="both", expand=True, pady=12)
+        details = ttk.Frame(frame)
+        details.pack(fill="both", expand=True, pady=12)
+        text = tk.Text(details, wrap="word", height=18, font=("TkDefaultFont", 11))
+        text.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(details, orient="vertical", command=text.yview)
+        scrollbar.pack(side="right", fill="y")
+        text.configure(yscrollcommand=scrollbar.set)
         text.insert("1.0", runtime_catalog_description(cached.runtime_options))
         text.configure(state="disabled")
-        choice = ttk.Combobox(frame, state="readonly", values=[item["name"] for item in choices])
-        choice.pack(fill="x", pady=8)
+        choice = tk.StringVar(master=dialog, value="")
+        ttk.Label(frame, text="请选择一项（默认不安装任何组件）：").pack(anchor="w", pady=(8, 4))
+        selection_frame = ttk.Frame(frame)
+        selection_frame.pack(fill="x", pady=4)
         install_button = ttk.Button(frame, text="确认所选单项安装", state="disabled")
         install_button.pack(side="left")
         ttk.Button(frame, text="关闭清单（不安装）", command=self._dismiss_installation).pack(side="right")
 
-        def selected(_event: Any = None) -> None:
-            index = choice.current()
+        def selected() -> None:
+            item = next((item for item in choices if item["id"] == choice.get()), None)
             install_button.configure(
-                state="normal" if index >= 0 and choices[index]["state"] == "available" else "disabled"
+                state="normal" if item is not None and item["state"] == "available" else "disabled"
             )
 
         def install() -> None:
-            index = choice.current()
-            if index < 0 or choices[index]["state"] != "available":
+            item = next((item for item in choices if item["id"] == choice.get()), None)
+            if item is None or item["state"] != "available":
                 return
-            self._confirm_installation(choices[index], parameters, generation)
+            self._confirm_installation(item, parameters, generation)
 
-        choice.bind("<<ComboboxSelected>>", selected)
+        first_available = None
+        for item in choices:
+            radio = ttk.Radiobutton(
+                selection_frame,
+                text=item["name"],
+                variable=choice,
+                value=item["id"],
+                command=selected,
+                state="normal" if item["state"] == "available" else "disabled",
+            )
+            radio.pack(anchor="w", pady=2)
+            if first_available is None and item["state"] == "available":
+                first_available = radio
         install_button.configure(command=install)
         dialog.protocol("WM_DELETE_WINDOW", self._dismiss_installation)
         self._controls(False)
+        # Focus does not select a component or grant installation authority.
+        # Visible radio options avoid an inaccessible native popup menu on Aqua.
+        if first_available is not None:
+            first_available.focus_set()
 
     def _dismiss_installation(self) -> None:
         dialog = getattr(self, "install_window", None)
@@ -881,7 +914,7 @@ class _DesktopWindow:
             + f"许可：{choice['license_notice']}\n"
             "只写入产品固定运行组件目录。安装不会启用任何权限，不启动浏览器、同步或模型。\n"
             "取消或退出须等待底层下载/安装线程真实结束。确认继续？",
-            parent=self.root,
+            parent=getattr(self, "install_window", None) or self.root,
         ):
             self.status.set("已取消单项安装，没有下载。")
             return
