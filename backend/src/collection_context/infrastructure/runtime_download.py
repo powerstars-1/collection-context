@@ -21,6 +21,13 @@ from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.public_http import PublicHTTP
 from collection_context.infrastructure.runtime_installation import ArtifactPlan
+from collection_context.infrastructure.runtime_media_layout import (
+    MEDIA_BYTES,
+    MEDIA_ID,
+    MEDIA_SHA256,
+    MEDIA_SOURCE,
+    bundled_media_archive,
+)
 from collection_context.infrastructure.runtime_stream import download_into
 
 DOWNLOAD_HOSTS = frozenset(
@@ -61,6 +68,15 @@ class RuntimeDownloads:
         if type(plan.bytes) is not int or not 0 < plan.bytes <= MAX_DOWNLOAD_BYTES:
             raise ContextError("runtime_download_limit", "此安装包超过当前下载器上限；未请求网络。")
         self._check_stop()
+        if plan.id == MEDIA_ID:
+            if (plan.bytes, plan.sha256, plan.source_url, plan.archive_type) != (
+                MEDIA_BYTES,
+                MEDIA_SHA256,
+                MEDIA_SOURCE,
+                "zip",
+            ):
+                raise ContextError("runtime_download_catalog", "随包媒体项与编译固定清单不符。")
+            return bundled_media_archive()
         transport = PublicHTTP(hosts=DOWNLOAD_HOSTS)
         transport.validate(plan.source_url)  # Before creating files, DNS or TLS.
         if plan.bytes > BUFFERED_DOWNLOAD_LIMIT:

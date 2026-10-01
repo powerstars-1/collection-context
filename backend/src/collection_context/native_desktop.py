@@ -516,6 +516,8 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
         "os_version_not_verified": "本机系统版本尚未确认",
         "sdk_version_mismatch": "浏览器运行库版本不匹配",
         "sdk_missing": "缺少浏览器运行库",
+        "bundled_component_missing": "此程序未携带该组件，请使用含组件的安装包",
+        "bundled_component_invalid": "随包组件校验前置条件不符，不可安装",
     }
     missing = {
         "desktop_browser": "可见登录浏览器",
@@ -524,7 +526,7 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
         "Windows": "Windows 固定安装包",
         "Linux": "Linux 固定安装包",
     }
-    lines = ["安装只下载已校验清单中的单项，不授予同步或模型权限。\n"]
+    lines = ["安装仅处理固定清单中的单项，不授予同步或模型权限。\n"]
     for item in options.get("artifacts", ()):
         size = item.get("download_bytes")
         volume = f"{size:,} 字节" if type(size) is int else "尚未提供"
@@ -537,6 +539,12 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
                 + " / "
                 + str(item.get("host_arch", "未提供")),
                 "下载体积：" + volume,
+                "交付方式："
+                + (
+                    "随包携带，无网络下载；来源地址是上游源码"
+                    if item.get("delivery") == "bundled"
+                    else "固定HTTPS下载"
+                ),
                 "来源：" + str(item.get("source_url", "未提供")),
                 "许可：" + str(item.get("license_notice", "许可尚未提供")),
                 "静态安装成功仍不等于登录、同步或识别可用。\n",
@@ -865,7 +873,12 @@ class _DesktopWindow:
             "确认单项组件安装",
             f"仅安装：{choice['name']}\n"
             f"下载体积：{choice['download_bytes']:,} 字节\n来源：{choice['source_url']}\n"
-            f"许可：{choice['license_notice']}\n"
+            + (
+                "随包携带，无网络下载；以上地址是上游源码，不是二进制下载地址。\n"
+                if choice.get("delivery") == "bundled"
+                else ""
+            )
+            + f"许可：{choice['license_notice']}\n"
             "只写入产品固定运行组件目录。安装不会启用任何权限，不启动浏览器、同步或模型。\n"
             "取消或退出须等待底层下载/安装线程真实结束。确认继续？",
             parent=self.root,

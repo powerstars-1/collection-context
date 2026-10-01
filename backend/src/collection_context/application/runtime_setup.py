@@ -26,6 +26,15 @@ from collection_context.infrastructure.runtime_browser_layout import (
 )
 from collection_context.infrastructure.runtime_download import RuntimeDownloads
 from collection_context.infrastructure.runtime_installation import ArtifactPlan, RuntimeInstaller, ToolSpec
+from collection_context.infrastructure.runtime_media_layout import (
+    MEDIA_BYTES,
+    MEDIA_ID,
+    MEDIA_PAYLOAD_BYTES,
+    MEDIA_SHA256,
+    MEDIA_SOURCE,
+    MEDIA_TOOLS,
+    bundled_media_state,
+)
 
 HEADLESS_ID = "chromium-headless-macos-arm64-1243"
 CATALOG = MappingProxyType(
@@ -77,11 +86,33 @@ CATALOG = MappingProxyType(
                 ),
             ),
         ),
+        MEDIA_ID: ArtifactPlan(
+            id=MEDIA_ID,
+            host_system="Darwin",
+            host_arch="arm64",
+            version="9.0.2",
+            source_url=MEDIA_SOURCE,
+            sha256=MEDIA_SHA256,
+            bytes=MEDIA_BYTES,
+            archive_type="zip",
+            tools=tuple(
+                ToolSpec(
+                    role=role,
+                    relative_path="bin/" + role,
+                    bytes=size,
+                    sha256=digest,
+                    version="9.0.2",
+                    license_id="LGPL-2.1-or-later",
+                    build_version="source-macos-arm64-1",
+                )
+                for role, (size, digest) in MEDIA_TOOLS.items()
+            ),
+        ),
     }
 )
 
 
-def _availability() -> str:
+def _availability(*, browser: bool = True) -> str:
     arch = platform.machine().lower()
     if platform.system() != "Darwin" or arch not in {"arm64", "aarch64"}:
         return "host_not_available"
@@ -90,6 +121,8 @@ def _availability() -> str:
             return "os_version_not_available"
     except (ValueError, IndexError):
         return "os_version_not_verified"
+    if not browser:
+        return bundled_media_state()
     try:
         if metadata.version("playwright") != "1.63.0":
             return "sdk_version_mismatch"
@@ -132,8 +165,25 @@ def runtime_options() -> dict[str, Any]:
                 "license_notice": "保留原 ABOUT／Widevine许可与内置 credits／terms；公开发行许可及签名仍待核验",
                 "functional_verified": False,
             },
+            {
+                "id": MEDIA_ID,
+                "name": "视频／音频处理工具（随包源码构建开发候选）",
+                "state": _availability(browser=False),
+                "host_system": "Darwin",
+                "host_arch": "arm64",
+                "minimum_macos": "14",
+                "download_bytes": 0,
+                "archive_bytes": MEDIA_BYTES,
+                "payload_bytes": MEDIA_PAYLOAD_BYTES,
+                "delivery": "bundled",
+                "source_url": MEDIA_SOURCE,
+                "source_url_kind": "upstream_source_not_binary_download",
+                "license_notice": "随包保留完整FFmpeg源码、LGPL许可及构建／签名材料；不联网下载，发行许可与签名仍待完成",
+                "functional_verified": False,
+            },
         ],
-        "not_available": ["ffmpeg_pair", "ocr_weights", "Windows", "Linux"],
+        "not_available": ([] if _availability(browser=False) == "available" else ["ffmpeg_pair"])
+        + ["ocr_weights", "Windows", "Linux"],
         "auto_install": False,
         "grants_sync_or_model_authority": False,
     }
@@ -151,7 +201,7 @@ def install_runtime(
         raise ContextError("runtime_install_catalog", "安装项不属于固定产品清单；未下载。")
     if installation_confirmed is not True:
         raise ContextError("runtime_install_confirmation", "请先查看清单并明确确认组件安装。")
-    if _availability() != "available":
+    if _availability(browser=artifact_id != MEDIA_ID) != "available":
         raise ContextError("runtime_install_unavailable", "当前系统、版本或运行库不满足此安装项。")
     with RuntimeDownloads(runtime_dir, catalog=CATALOG, stop=stop) as source:
         installer = RuntimeInstaller(

@@ -8,6 +8,7 @@ identity or publishes a build. PyInstaller may add a local ad-hoc Mach-O signatu
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -142,6 +143,8 @@ def freeze_command(stage: Path, source: Path, entry: Path, *, desktop: bool = Fa
         )
     if (stage / "licenses").is_dir():
         command.extend(["--add-data", str(stage / "licenses") + ":native_licenses"])
+    if (stage / "native_software").is_dir():
+        command.extend(["--add-data", str(stage / "native_software") + ":native_software"])
     for package in ("uvicorn", "mcp.server", "mcp.shared"):
         command.extend(["--collect-submodules", package])
     for package in ("fastapi", "mcp", "uvicorn"):
@@ -166,7 +169,51 @@ def license_inventory(stage: Path) -> dict:
     return module.collect_licenses(Path(sys.prefix).absolute(), stage / "licenses")
 
 
-def build(output: Path, *, desktop: bool = False) -> dict:
+def media_identity() -> dict:
+    """Read only fixed literal declarations, not an executable plugin/config."""
+    path = (
+        Path(__file__).resolve().parents[2] / "src/collection_context/infrastructure/runtime_media_layout.py"
+    )
+    if path.is_symlink() or path.stat().st_size > 32_000:
+        raise ValueError("Expected a bounded fixed media catalog declaration")
+    values = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            name = node.targets[0].id
+            if name in {"MEDIA_ID", "MEDIA_BYTES", "MEDIA_SHA256"}:
+                values[name] = ast.literal_eval(node.value)
+    if (
+        set(values) != {"MEDIA_ID", "MEDIA_BYTES", "MEDIA_SHA256"}
+        or not isinstance(values["MEDIA_ID"], str)
+        or "/" in values["MEDIA_ID"]
+        or type(values["MEDIA_BYTES"]) is not int
+        or not 0 < values["MEDIA_BYTES"] < 128_000_000
+        or not isinstance(values["MEDIA_SHA256"], str)
+        or len(values["MEDIA_SHA256"]) != 64
+    ):
+        raise ValueError("Fixed media catalog identity is incomplete")
+    return {
+        "filename": values["MEDIA_ID"] + ".zip",
+        "bytes": values["MEDIA_BYTES"],
+        "sha256": values["MEDIA_SHA256"],
+    }
+
+
+def checked_media_package(path: Path) -> dict:
+    identity = media_identity()
+    if not path.is_absolute() or ".." in path.parts or any(p.is_symlink() for p in (path, *path.parents)):
+        raise ValueError("Media component must be an explicit ordinary file")
+    before = path.stat()
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != identity["bytes"]:
+        raise ValueError("Media component size differs from the compiled catalog")
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if path.stat() != before or digest != identity["sha256"]:
+        raise ValueError("Media component content differs from the compiled catalog")
+    return identity
+
+
+def build(output: Path, *, desktop: bool = False, media_package: Path | None = None) -> dict:
     root = Path(__file__).resolve().parents[2]
     external = checked_output(output, root.parent.resolve())
     if desktop and sys.platform != "darwin":
@@ -175,6 +222,7 @@ def build(output: Path, *, desktop: bool = False) -> dict:
         if metadata.version(package) != expected:
             raise ValueError(f"Build dependency version mismatch: {package}")
     browser_sdk = checked_browser_sdk()  # Reject before creating/copying any candidate.
+    media = checked_media_package(media_package) if media_package is not None else None
     external.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="native-candidate-", dir=external))
     source = stage / "src" / "collection_context"
@@ -187,6 +235,14 @@ def build(output: Path, *, desktop: bool = False) -> dict:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     validate_source(source)
+    if media is not None:
+        assert media_package is not None
+        software = stage / "native_software"
+        software.mkdir(mode=0o700)
+        snapshot = software / media["filename"]
+        shutil.copyfile(media_package, snapshot)
+        snapshot.chmod(0o600)
+        checked_media_package(snapshot)  # Input changes cannot enter the frozen candidate.
     licenses = license_inventory(stage)
     entry = stage / "entry.py"
     shutil.copy2(Path(__file__).with_name("entry.py"), entry)
@@ -224,7 +280,18 @@ def build(output: Path, *, desktop: bool = False) -> dict:
         "requires_user_python_or_node": False,
         "bundled_roles": ["cli", "stdio_mcp", "authenticated_http", "terminal_launcher", "source_browser_sdk"]
         + (["desktop_picker"] if desktop else []),
-        "not_bundled": ["chromium_browser_runtime", "ffmpeg", "ocr_runtime_and_weights"],
+        "media_component": (
+            {
+                **media,
+                "delivery": "bundled_archive_explicit_installation",
+                "runtime_installed": False,
+                "contains_complete_upstream_source": True,
+            }
+            if media is not None
+            else None
+        ),
+        "not_bundled": ["chromium_browser_runtime", "ocr_runtime_and_weights"]
+        + ([] if media is not None else ["ffmpeg"]),
         "developer_signed": False,
         "notarized": False,
         "tool_generated_ad_hoc_signature": sys.platform == "darwin",
@@ -239,8 +306,9 @@ def main() -> int:
     parser.add_argument(
         "--desktop-app", action="store_true", help="本机Mac开发候选 .app；同时保留console程序"
     )
+    parser.add_argument("--media-package", type=Path, help="仅接受编译固定hash的媒体组件包，不接受任意归档")
     args = parser.parse_args()
-    report = build(args.output, desktop=args.desktop_app)
+    report = build(args.output, desktop=args.desktop_app, media_package=args.media_package)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     Path(report["stage"], "build-report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

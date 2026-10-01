@@ -47,6 +47,57 @@ def test_native_output_accepts_specific_external_directory_without_creating(tmp_
     assert not output.exists()
 
 
+def test_fixed_media_identity_comes_from_product_literals():
+    from collection_context.infrastructure import runtime_media_layout as layout
+
+    assert build_tool().media_identity() == {
+        "filename": layout.MEDIA_FILENAME,
+        "bytes": layout.MEDIA_BYTES,
+        "sha256": layout.MEDIA_SHA256,
+    }
+
+
+@pytest.mark.parametrize("kind", ["wrong_hash", "size", "link", "hardlink", "directory", "relative"])
+def test_media_build_rejects_unfixed_or_unsafe_archive(tmp_path, monkeypatch, kind):
+    import os
+
+    tool = build_tool()
+    root = tmp_path.resolve()
+    path = root / "package.zip"
+    path.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        tool,
+        "media_identity",
+        lambda: {"filename": "fixed.zip", "bytes": 7, "sha256": hashlib.sha256(b"fixture").hexdigest()},
+    )
+    if kind == "wrong_hash":
+        path.write_bytes(b"changed")
+    elif kind == "size":
+        path.write_bytes(b"wrong")
+    elif kind == "link":
+        original = path
+        path = root / "link"
+        path.symlink_to(original)
+    elif kind == "hardlink":
+        os.link(path, root / "other")
+    elif kind == "directory":
+        path.unlink()
+        path.mkdir()
+    elif kind == "relative":
+        path = Path("package.zip")
+    with pytest.raises(ValueError):
+        tool.checked_media_package(path)
+
+
+def test_bundled_media_resource_in_both_console_and_app_commands(tmp_path, monkeypatch):
+    tool = build_tool()
+    monkeypatch.setattr(tool.sys, "platform", "darwin")
+    (tmp_path / "native_software").mkdir()
+    for desktop in (False, True):
+        command = tool.freeze_command(tmp_path, tmp_path / "source", tmp_path / "entry.py", desktop=desktop)
+        assert str(tmp_path / "native_software") + ":native_software" in command
+
+
 def test_desktop_freeze_preserves_separate_console_entry_and_mcp_metadata(tmp_path, monkeypatch):
     tool = build_tool()
     monkeypatch.setattr(tool.sys, "platform", "darwin")

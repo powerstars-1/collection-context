@@ -11,7 +11,7 @@
 - 构建环境新建在仓库外；`requirements-build.in` 锁定五个直接依赖（含Playwright1.63.0），39个传递构建依赖由完整hash锁固定。只使用PyPI与官方组件，不安装参考项目。
 - `build.py --output <库外专用构建目录>` 仅复制自有 `src/collection_context` 与静态资产，拒绝源码链接和未列入白名单的类型；新建唯一临时 stage，不覆盖已有发行目录。
 - 不自动下载依赖、不使用开发者证书签名、公证、发布或配置常驻服务。macOS ARM64 的 PyInstaller 会自动生成本机运行所需的 ad-hoc 签名；它不是 Apple 开发者签名或公证。构建者需先在隔离环境安装依赖，然后用该环境 Python 执行工具。
-- 基础包包含Playwright SDK及其wheel内Node／JS，使用官方hook，不读取宿主Node或浏览器缓存；构建前拒绝任何 `.local-browsers`、链接或未注册资源。包不含Chromium浏览器、FFmpeg或OCR运行库／权重；无法宣称完整同步与识别均开箱即用。用户模型账户与费用另行配置。
+- 基础包包含Playwright SDK及其wheel内Node／JS，使用官方hook，不读取宿主Node或浏览器缓存；构建前拒绝任何 `.local-browsers`、链接或未注册资源。默认包不含Chromium浏览器、FFmpeg或OCR运行库／权重；开发者可用下述固定hash媒体包选项携带FFmpeg配对组件。无法宣称完整同步与识别均开箱即用。用户模型账户与费用另行配置。
 - PyInstaller 许可有针对打包应用的例外，但 Python、GUI 库和所有传递依赖仍须保留各自许可。当前候选尚不能替代公开发行许可审查。
 - `licenses.py` 只读取显式构建环境的已登记分发元数据、许可原文和准确注册的前端声明；不导入依赖或扫描用户资料。拒绝链接、硬链接、身份冲突、非空输出与超限读取，记录版本、原文字节哈希和来源相对路径。清单只代表构建环境，不断言每个包都在运行时内；CPython、Tcl/Tk、OpenSSL、原生嵌入组件以及产品许可仍须独立闭合。`runtime_sbom_verified` 固定为 false，不因收齐 dist-info 文件而宣称发行许可完成。
 
@@ -49,7 +49,7 @@ CLI／HTTP／后台的本机启动者可明确选择 `--credential-backend syste
 4. 每份下载固定 HTTPS 来源、大小、SHA-256 和目标平台，先写专用临时目录，验证后原子安装；拒绝归档越界、未知链接与冲突。唯一已核实的浏览器归档可保留其五个编译固定的内部相对链接，不接受用户提供的链接策略。中断保留可诊断状态，不隐式重试云请求。
 5. 安装后实际运行探测，再显示就绪；失败保持已建资料库，不启用定时同步或任何费用。用户可跳过并明确获得仅读库/管理页的降级状态。
 
-2026-10-02 已实现共享固定清单安装器与本地CLI：明确确认、内核独占安装锁、完整包大小／hash、受控解包、分代保留及原子收据。固定HTTPS下载不继承代理、不携带凭据、不自动重试。已核实清单包含Mac14+ ARM64无桌面浏览器与可见浏览器开发候选；FFmpeg配对、OCR权重与其他平台尚未提供。资料库可不存在，安装不会创建库或启动处理任务。浏览器可见窗口本机渲染已经源码及独立程序验证，但真实抖音登录未验收，公开发行许可、签名与公证未关闭。
+2026-10-02 已实现共享固定清单安装器与本地CLI：明确确认、内核独占安装锁、完整包大小／hash、受控解包、分代保留及原子收据。固定HTTPS下载不继承代理、不携带凭据、不自动重试。已核实清单包含Mac14+ ARM64无桌面浏览器、可见浏览器与随包FFmpeg配对开发候选；OCR权重与其他平台尚未提供。资料库可不存在，安装不会创建库或启动处理任务。浏览器可见窗口本机渲染及随包媒体安装后原创夹具处理已经独立程序验证，但真实抖音登录未验收，公开发行许可、签名与公证未关闭。
 
 桌面候选新增“安装运行组件”入口：先异步只读检查，然后打开固定清单，显示主机状态、下载体积、来源、许可及缺项。没有默认选中项；用户选择单项后还须再次确认。无桌面浏览器不能代替可见登录浏览器；可见候选单独选择，不支持的主机不能点击安装。安装只写产品固定的库外运行目录，页面不能传入URL、安装路径或命令；模型配置、登录、模型执行与来源执行四个授权保持原值。
 
@@ -73,7 +73,7 @@ collection-context --workspace /absolute/new-library --runtime-dir /absolute/pro
 
 可见候选使用上述脚本的显式 `--headed`，报告为 `frozen_headed_local_fixture_only`，不能用headless结果充当该项通过。Chrome for Testing归档固定完整hash，五个framework相对链接名称／目标均须精确匹配并留在普通节点构成的本代树内；泛用资料读取、其他归档及可执行文件路径仍拒绝链接。保留ABOUT、Widevine许可和内置credits／terms，不修改签名、不移除quarantine、不绕过系统安全保护。每次使用重验主执行文件与已知五个链接，但不声称完整资源树每次重新hash。
 
-## 媒体工具的自有构建候选（尚未加入安装器）
+## 媒体工具的自有构建候选
 
 现成Mac ARM64配对制品实测缺少PNG编码器，不能拿版本探测冒充选帧通过。新增开发者工具 `ffmpeg_source_build.py`：只构建固定FFmpeg9.0.2官方源码，先校验固定SHA256与官方主签名指纹，再在新库外目录编译；脚本不下载、不装包、不写系统目录、不发布、不改产品runtime。仅Mac ARM64开发构建有实际证据，不要求普通用户自行编译，也不声明Windows/Linux已支持。[官方源码与签名指导](https://ffmpeg.org/download.html)。
 
@@ -89,3 +89,18 @@ python ffmpeg_probe.py --ffmpeg /absolute/new-build/artifacts/ffmpeg --ffprobe /
 ```
 
 后一探测只生成原创RGB页面和音频，实测同一自有LocalMedia的音轨分段、扫描、选择、PNG输出，并查动态依赖。成功仅为该制品的本机软件能力证据，不证明抖音H264／HEVC全场景、真实识别精度、冻结后台、GUI安装或新手体验。实际候选hash与报告位置见实施记录。
+
+### 随包配对媒体组件与独立程序实测
+
+开发者 `media_package.py` 只接受固定长度／SHA256的已构建成对工具、完整官方源码及原许可；先复验官方分离签名，再生成确定性的九成员普通ZIP。归档保留公钥、分离签名与构建配方，不把构建目录的任意报告、环境或私人文件打包。只有固定制品才进入 `build.py --media-package /absolute/fixed-package.zip`；输入和复制快照均重验固定hash。该选项不会下载、安装或发布软件，默认构建仍不携带媒体工具。
+
+组件由独立程序内部资源提供，Mac `.app` 用真实 `Contents/Resources/native_software`，控制台用固定 `_MEIPASS/native_software`。源码模式、缺失、链接／硬链接、大小不符均拒绝，不回退系统PATH、任意用户路径或网络镜像。完整归档hash仍由共享安装器在解包前校验。GUI清单区分“网络下载0字节、随包归档体积、展开体积”，来源链接明确是上游源码，不能误作二进制下载地址。用户选择及二次确认仍必须完成，静态收据不冒充功能通过。
+
+安装后可显式运行产品内置的固定原创三秒媒体探测；它不读现有视频、不建立资料库、不授予同步／模型权限，也不改安装收据：
+
+```bash
+CollectionContext cli --workspace /absolute/absent-library --runtime-dir /absolute/new-runtime install-runtime --artifact ffmpeg-macos-arm64-9.0.2-development-1 --confirm-install
+CollectionContext cli --workspace /absolute/absent-library --runtime-dir /absolute/new-runtime probe-media-runtime --probe-dir /absolute/new-original-probe
+```
+
+`media_runtime_smoke.py --binary /absolute/CollectionContext --output /absolute/new-stage` 从空PATH／新HOME运行上述真实冻结子进程，验证离线安装、2音频段、6采样／4选中PNG帧及收据不变；输出目录须新建且在仓库外。运行组件和探测目录均在本次独立stage内，不借用旧工具。普通CLI／MCP／HTTP继续由 `smoke.py` 独立验证，开发者调用该脚本须显式 `PYTHONPATH=src`，该变量不传入冻结产品子进程。冻结探测不证明真实内容质量、GUI全部安装交互、macOS14最低系统、Windows／Linux或公开发行许可与签名。
