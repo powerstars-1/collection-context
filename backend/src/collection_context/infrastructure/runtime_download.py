@@ -10,6 +10,7 @@ misrepresented as immediate cancellation of an outstanding socket read.
 from __future__ import annotations
 
 import hashlib
+import os
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -20,11 +21,13 @@ from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.public_http import PublicHTTP
 from collection_context.infrastructure.runtime_installation import ArtifactPlan
+from collection_context.infrastructure.runtime_stream import download_into
 
 DOWNLOAD_HOSTS = frozenset(
     {"cdn.playwright.dev", "playwright.download.prss.microsoft.com", "storage.googleapis.com"}
 )
-MAX_DOWNLOAD_BYTES = 128_000_000
+MAX_DOWNLOAD_BYTES = 2_147_483_648
+BUFFERED_DOWNLOAD_LIMIT = 128_000_000
 
 
 class RuntimeDownloads:
@@ -60,6 +63,8 @@ class RuntimeDownloads:
         self._check_stop()
         transport = PublicHTTP(hosts=DOWNLOAD_HOSTS)
         transport.validate(plan.source_url)  # Before creating files, DNS or TLS.
+        if plan.bytes > BUFFERED_DOWNLOAD_LIMIT:
+            return self._large_archive(transport, plan)
         try:
             data = transport.get(plan.source_url, max_bytes=plan.bytes, timeout=120).data
         except ContextError:
@@ -72,6 +77,26 @@ class RuntimeDownloads:
         root = Path(temporary.name)
         with SafeFiles(root) as files:
             files.write("artifact", data)
+        self._check_stop()
+        return root / "artifact"
+
+    def _large_archive(self, transport: PublicHTTP, plan: ArtifactPlan) -> Path:
+        temporary = tempfile.TemporaryDirectory(prefix=".download-", dir=self._runtime_dir)
+        self._temporary.append(temporary)
+        root = Path(temporary.name)
+        with SafeFiles(root) as files:
+            fd = os.open(
+                "artifact", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=files.fd
+            )
+            try:
+                size, digest = download_into(
+                    transport, plan.source_url, fd, expected_bytes=plan.bytes, check_cancel=self._check_stop
+                )
+                files.check_root()
+            finally:
+                os.close(fd)
+        if size != plan.bytes or digest != plan.sha256:
+            raise ContextError("runtime_download_integrity", "下载内容与固定清单不符；未安装。")
         self._check_stop()
         return root / "artifact"
 

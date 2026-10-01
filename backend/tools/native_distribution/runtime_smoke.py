@@ -48,7 +48,7 @@ def run(binary: Path, arguments: list[str], *, stage: Path, environment: dict[st
     return payload["data"]
 
 
-def exercise(binary: Path, runtime: Path, output: Path) -> dict:
+def exercise(binary: Path, runtime: Path, output: Path, *, headed: bool = False) -> dict:
     if not binary.is_absolute() or not binary.is_file() or binary.is_symlink():
         raise ValueError("Expected an explicit frozen executable")
     if not runtime.is_absolute() or not runtime.is_dir() or runtime.is_symlink():
@@ -69,20 +69,32 @@ def exercise(binary: Path, runtime: Path, output: Path) -> dict:
         "model_requests": 0,
         "browser_probe": "not_completed",
         "installation_receipt_unchanged": False,
-        "verification_scope": "frozen_headless_local_fixture_only",
+        "verification_scope": "frozen_headed_local_fixture_only"
+        if headed
+        else "frozen_headless_local_fixture_only",
     }
     try:
         common = ["--workspace", str(stage / "absent-library"), "--runtime-dir", str(runtime)]
         options = run(binary, [*common, "runtime-options"], stage=stage, environment=environment)
-        assert options["artifacts"][0]["state"] == "available"
+        artifact_id = "chromium-macos-arm64-1243" if headed else "chromium-headless-macos-arm64-1243"
+        selected = [item for item in options["artifacts"] if item["id"] == artifact_id]
+        assert len(selected) == 1 and selected[0]["state"] == "available"
         probe = run(
             binary,
-            [*common, "probe-runtime", "--browser-dir", str(stage / "new-probe-profile")],
+            [
+                *common,
+                "probe-runtime",
+                "--browser-dir",
+                str(stage / "new-probe-profile"),
+                *(["--headed"] if headed else []),
+            ],
             stage=stage,
             environment=environment,
         )
         assert probe["functional_verified"] is True and probe["browser_closed"] is True
-        assert probe["verification_scope"] == "owned_headless_local_fixture_only"
+        assert probe["verification_scope"] == (
+            "owned_headed_local_fixture_only" if headed else "owned_headless_local_fixture_only"
+        )
         assert probe["sync_verified"] is False and probe["platform_login_verified"] is False
         assert not (stage / "absent-library").exists()
         report["browser_probe"] = "passed"
@@ -102,8 +114,11 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--runtime", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--headed", action="store_true", help="Explicit visible browser local fixture; not platform login"
+    )
     arguments = parser.parse_args()
-    report = exercise(arguments.binary, arguments.runtime, arguments.output)
+    report = exercise(arguments.binary, arguments.runtime, arguments.output, headed=arguments.headed)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

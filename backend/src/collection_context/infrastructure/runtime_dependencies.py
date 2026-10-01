@@ -342,6 +342,12 @@ class RuntimeDependencies:
         if tool is None:
             raise _error("runtime_dependency_missing")
         if role in BROWSER_ROLES:
+            from collection_context.infrastructure.runtime_browser_layout import verify_browser_aliases
+
+            try:
+                verify_browser_aliases(self.runtime_dir, tool)
+            except (ContextError, OSError):
+                raise _error("runtime_dependency_unsafe") from None
             try:
                 installed = metadata.version("playwright")
             except Exception:

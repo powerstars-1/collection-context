@@ -46,12 +46,12 @@ CLI／HTTP／后台的本机启动者可明确选择 `--credential-backend syste
 1. 显示各能力当前是否可用、预计下载体积、供应来源、许可及保存目录；模型/API Key 不作为软件安装的前置输入。
 2. 用户分别确认浏览器、媒体工具、OCR；下载与本机文件安装不授予平台同步、模型上传或自动提取权限。
 3. 浏览器固定 Playwright 版本匹配的 Chromium 官方运行包。FFmpeg 各系统从核验的官方认可发行源选择并审查 LGPL/GPL 构建选项；无法确认许可时不自动分发。OCR 固定运行库与权重版本/许可。
-4. 每份下载固定 HTTPS 来源、大小、SHA-256 和目标平台，先写专用临时目录，验证后原子安装；拒绝归档越界、链接与冲突。中断保留可诊断状态，不隐式重试云请求。
+4. 每份下载固定 HTTPS 来源、大小、SHA-256 和目标平台，先写专用临时目录，验证后原子安装；拒绝归档越界、未知链接与冲突。唯一已核实的浏览器归档可保留其五个编译固定的内部相对链接，不接受用户提供的链接策略。中断保留可诊断状态，不隐式重试云请求。
 5. 安装后实际运行探测，再显示就绪；失败保持已建资料库，不启用定时同步或任何费用。用户可跳过并明确获得仅读库/管理页的降级状态。
 
-2026-10-02 已实现共享固定清单安装器与本地CLI：明确确认、内核独占安装锁、完整包大小／hash、受控解包、分代保留及原子收据。固定HTTPS下载不继承代理、不携带凭据、不自动重试。首个已核实清单仅覆盖Mac14+ ARM64无桌面浏览器；可见登录窗口、FFmpeg配对、OCR权重与其他平台尚未提供。资料库可不存在，安装不会创建库或启动处理任务。
+2026-10-02 已实现共享固定清单安装器与本地CLI：明确确认、内核独占安装锁、完整包大小／hash、受控解包、分代保留及原子收据。固定HTTPS下载不继承代理、不携带凭据、不自动重试。已核实清单包含Mac14+ ARM64无桌面浏览器与可见浏览器开发候选；FFmpeg配对、OCR权重与其他平台尚未提供。资料库可不存在，安装不会创建库或启动处理任务。浏览器可见窗口本机渲染已经源码及独立程序验证，但真实抖音登录未验收，公开发行许可、签名与公证未关闭。
 
-桌面候选新增“安装运行组件”入口：先异步只读检查，然后打开固定清单，显示主机状态、下载体积、来源、许可及缺项。没有默认选中项；用户选择单项后还须再次确认。当前无桌面浏览器不能代替可见登录浏览器，不支持的主机不能点击安装。安装只写产品固定的库外运行目录，页面不能传入URL、安装路径或命令；模型配置、登录、模型执行与来源执行四个授权保持原值。
+桌面候选新增“安装运行组件”入口：先异步只读检查，然后打开固定清单，显示主机状态、下载体积、来源、许可及缺项。没有默认选中项；用户选择单项后还须再次确认。无桌面浏览器不能代替可见登录浏览器；可见候选单独选择，不支持的主机不能点击安装。安装只写产品固定的库外运行目录，页面不能传入URL、安装路径或命令；模型配置、登录、模型执行与来源执行四个授权保持原值。
 
 安装与服务启动互斥；安装期间不能切换资料库或启动服务。选择、停止、退出或参数变化会废弃旧确认意图。停止只请求协作取消，退出保持窗口直到真实安装线程结束；网络等待不冒充已经中断。静态安装成功不显示为登录、同步或识别已通过，实际功能仍须独立探测。此入口的离线回归、冻结程序及实际窗口证据分别记录，不把替身测试当三端或新用户验收。
 
@@ -61,8 +61,14 @@ CLI／HTTP／后台的本机启动者可明确选择 `--credential-backend syste
 collection-context --workspace /absolute/new-library runtime-options
 collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime install-runtime --artifact chromium-headless-macos-arm64-1243 --confirm-install
 collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime probe-runtime --browser-dir /absolute/new-probe-profile
+
+# 可见窗口候选，单独安装与单独新profile探测；不启动平台登录。
+collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime install-runtime --artifact chromium-macos-arm64-1243 --confirm-install
+collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime probe-runtime --browser-dir /absolute/new-visible-probe-profile --headed
 ```
 
-查看命令只显示大小／系统／来源／许可与缺项；确认安装仅授权这份软件，不授权登录、同步或模型费用。安装成功初始为static_verified，功能仍false；探测显式启动新空白浏览器，本机页面成功且关闭后才报告功能通过。探测目录必须不存在，拒绝借用用户登录态；该结果不等于五类抖音来源可用。下载单包128MB／120秒，取消在阻塞网络或文件操作后观察，不谎报立即退出；失败暂存、旧代保留。receipt发布异常可返回outcome_unknown，不自动回滚或重试。
+查看命令只显示大小／系统／来源／许可与缺项；确认安装仅授权这份软件，不授权登录、同步或模型费用。安装成功初始为static_verified，功能仍false；探测显式启动新空白浏览器，本机页面成功且关闭后才报告功能通过。探测目录必须不存在，拒绝借用用户登录态；该结果不等于五类抖音来源可用。固定软件下载包最多2GiB：不超过128MB沿用缓冲传输／120秒，超过则专用64KiB分块写盘／300秒；普通媒体下载的128MB上限不变。取消在阻塞网络或文件操作后观察，不谎报立即退出；失败暂存、旧代保留。receipt发布异常可返回outcome_unknown，不自动回滚或重试。
 
 `runtime_smoke.py --binary <明确控制台> --runtime <已验证安装目录> --output <不存在的新库外目录>` 已以新HOME／空PATH验证原生包内驱动、浏览器本机渲染／退出及收据不变；不下载、不接平台、不读模型Key。精确候选／报告见实施记录。普通CLI／MCP／HTTP／停止及异路径运行仍单独验收，构建成功不能代替运行证明。原生许可、签名、全部组件的桌面安装与三端发行仍未完成。
+
+可见候选使用上述脚本的显式 `--headed`，报告为 `frozen_headed_local_fixture_only`，不能用headless结果充当该项通过。Chrome for Testing归档固定完整hash，五个framework相对链接名称／目标均须精确匹配并留在普通节点构成的本代树内；泛用资料读取、其他归档及可执行文件路径仍拒绝链接。保留ABOUT、Widevine许可和内置credits／terms，不修改签名、不移除quarantine、不绕过系统安全保护。每次使用重验主执行文件与已知五个链接，但不声称完整资源树每次重新hash。

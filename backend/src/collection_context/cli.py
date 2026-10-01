@@ -55,6 +55,9 @@ def parser() -> argparse.ArgumentParser:
     runtime_probe.add_argument(
         "--browser-dir", type=Path, required=True, help="不存在的新探测目录；拒绝借用已有登录态"
     )
+    runtime_probe.add_argument(
+        "--headed", action="store_true", help="明确测试可见浏览器；仍只渲染本机空白样例"
+    )
     commands.add_parser("init", help="只初始化新空目录，不覆盖已有文件")
     commands.add_parser("upgrade-writer", help="显式升级早期开发库写锁；保留资料，不自动清除旧占用")
     commands.add_parser("rebuild-index", help="显式重建派生索引，不调用模型")
@@ -257,7 +260,12 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.runtime_dir is None:
                 raise ContextError("runtime_install_directory_required", "请明确指定库外的运行依赖目录。")
-            data = probe_runtime(args.runtime_dir, library_dir=args.workspace, browser_dir=args.browser_dir)
+            data = probe_runtime(
+                args.runtime_dir,
+                library_dir=args.workspace,
+                browser_dir=args.browser_dir,
+                headless=not args.headed,
+            )
         elif args.command == "init":
             store = LibraryStore.initialize(args.workspace)
             data = {"initialized": True, "auto_sync": False, "auto_process": False}

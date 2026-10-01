@@ -27,6 +27,7 @@ from collection_context.application.contracts import ContextError, canonical_byt
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.ownership import _FileLease
 from collection_context.infrastructure.platform_safety import require_safe_files_runtime
+from collection_context.infrastructure.runtime_browser_layout import archive_aliases, create_archive_aliases
 from collection_context.infrastructure.runtime_dependencies import (
     _LABEL,
     _SHA256,
@@ -430,6 +431,8 @@ class RuntimeInstaller:
     def _unpack(self, stage: SafeFiles, plan: ArtifactPlan, stop: threading.Event | None) -> None:
         budget = _Budget()
         explicit = set()
+        aliases = archive_aliases(plan.id, plan.sha256, plan.source_url)
+        observed_aliases: set[str] = set()
         executables = {tool.relative_path for tool in plan.tools}
         fd = os.open(_SNAPSHOT, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=stage.fd)
         with os.fdopen(fd, "rb") as stream:
@@ -445,6 +448,7 @@ class RuntimeInstaller:
                         kind = stat.S_IFMT(mode)
                         if (
                             kind not in {0, stat.S_IFDIR if directory else stat.S_IFREG}
+                            and not (kind == stat.S_IFLNK and item.filename in aliases and not directory)
                             or item.flag_bits & 1
                             or item.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
                             or item.orig_filename != item.filename
@@ -464,7 +468,14 @@ class RuntimeInstaller:
                             raise _error("runtime_install_unsafe")
                         explicit.add(name)
                         budget.size(item.file_size)
-                        if directory:
+                        if kind == stat.S_IFLNK:
+                            target = aliases[name].encode("utf-8")
+                            if item.file_size != len(target) or archive.read(item) != target:
+                                raise _error("runtime_install_unsafe")
+                            observed_aliases.add(name)
+                        elif name in aliases:
+                            raise _error("runtime_install_unsafe")
+                        elif directory:
                             self._member(stage, name, None, 0, False, stop)
                         else:
                             with archive.open(item) as member:
@@ -476,6 +487,10 @@ class RuntimeInstaller:
                                     bool(mode & stat.S_IXUSR) or name in executables,
                                     stop,
                                 )
+                    if observed_aliases != set(aliases):
+                        raise _error("runtime_install_unsafe")
+                    _cancel(stop)
+                    create_archive_aliases(stage, aliases)
             else:
 
                 class BoundedTarInfo(tarfile.TarInfo):
