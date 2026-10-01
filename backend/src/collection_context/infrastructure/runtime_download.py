@@ -28,6 +28,13 @@ from collection_context.infrastructure.runtime_media_layout import (
     MEDIA_SOURCE,
     bundled_media_archive,
 )
+from collection_context.infrastructure.runtime_ocr import OCR_SOURCE
+from collection_context.infrastructure.runtime_ocr_layout import (
+    OCR_BYTES,
+    OCR_ID,
+    OCR_SHA256,
+    bundled_ocr_archive,
+)
 from collection_context.infrastructure.runtime_stream import download_into
 
 DOWNLOAD_HOSTS = frozenset(
@@ -68,6 +75,15 @@ class RuntimeDownloads:
         if type(plan.bytes) is not int or not 0 < plan.bytes <= MAX_DOWNLOAD_BYTES:
             raise ContextError("runtime_download_limit", "此安装包超过当前下载器上限；未请求网络。")
         self._check_stop()
+        if plan.id == OCR_ID:
+            if (plan.bytes, plan.sha256, plan.source_url, plan.archive_type) != (
+                OCR_BYTES,
+                OCR_SHA256,
+                OCR_SOURCE,
+                "zip",
+            ):
+                raise ContextError("runtime_download_catalog", "随包OCR项与编译固定清单不符。")
+            return bundled_ocr_archive()
         if plan.id == MEDIA_ID:
             if (plan.bytes, plan.sha256, plan.source_url, plan.archive_type) != (
                 MEDIA_BYTES,

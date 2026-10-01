@@ -32,8 +32,11 @@ from collection_context.infrastructure.runtime_dependencies import (
     _LABEL,
     _SHA256,
     BROWSER_ROLES,
+    DEPENDENCY_ROLES,
+    MAX_MODEL_BYTES,
     MAX_RECEIPT_BYTES,
     MAX_TOOL_BYTES,
+    MODEL_ROLES,
     RECEIPT_NAME,
     TOOL_ROLES,
     RuntimeDependencies,
@@ -208,7 +211,7 @@ class RuntimeInstaller:
             or not isinstance(plan.archive_type, str)
             or plan.archive_type not in ARCHIVE_TYPES
             or not isinstance(plan.tools, tuple)
-            or not 1 <= len(plan.tools) <= len(TOOL_ROLES)
+            or not 1 <= len(plan.tools) <= len(DEPENDENCY_ROLES)
         ):
             raise _error("runtime_install_invalid")
         roles, paths = set(), set()
@@ -216,10 +219,12 @@ class RuntimeInstaller:
             if (
                 not isinstance(tool, ToolSpec)
                 or not isinstance(tool.role, str)
-                or tool.role not in TOOL_ROLES
+                or tool.role not in DEPENDENCY_ROLES
                 or tool.role in roles
                 or type(tool.bytes) is not int
                 or not 0 < tool.bytes <= min(MAX_TOOL_BYTES, MAX_MEMBER_BYTES)
+                or tool.role in MODEL_ROLES
+                and tool.bytes > MAX_MODEL_BYTES
                 or not isinstance(tool.sha256, str)
                 or not _SHA256.fullmatch(tool.sha256)
                 or any(
@@ -257,6 +262,13 @@ class RuntimeInstaller:
         if ("ffmpeg" in roles) != ("ffprobe" in roles):
             raise _error("runtime_install_invalid")
         by_role = {tool.role: tool for tool in plan.tools}
+        model_roles = MODEL_ROLES.intersection(roles)
+        if model_roles and (
+            model_roles != MODEL_ROLES
+            or len({by_role[role].build_version for role in MODEL_ROLES}) != 1
+            or len({by_role[role].relative_path.rsplit("/", 1)[0] for role in MODEL_ROLES}) != 1
+        ):
+            raise _error("runtime_install_invalid")
         if "ffmpeg" in roles and by_role["ffmpeg"].build_version != by_role["ffprobe"].build_version:
             raise _error("runtime_install_invalid")
         if BROWSER_ROLES.issubset(roles) and (
@@ -433,7 +445,7 @@ class RuntimeInstaller:
         explicit = set()
         aliases = archive_aliases(plan.id, plan.sha256, plan.source_url)
         observed_aliases: set[str] = set()
-        executables = {tool.relative_path for tool in plan.tools}
+        executables = {tool.relative_path for tool in plan.tools if tool.role in TOOL_ROLES}
         fd = os.open(_SNAPSHOT, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=stage.fd)
         with os.fdopen(fd, "rb") as stream:
             before = os.fstat(stream.fileno())

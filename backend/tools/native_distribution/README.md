@@ -104,3 +104,23 @@ CollectionContext cli --workspace /absolute/absent-library --runtime-dir /absolu
 ```
 
 `media_runtime_smoke.py --binary /absolute/CollectionContext --output /absolute/new-stage` 从空PATH／新HOME运行上述真实冻结子进程，验证离线安装、2音频段、6采样／4选中PNG帧及收据不变；输出目录须新建且在仓库外。运行组件和探测目录均在本次独立stage内，不借用旧工具。普通CLI／MCP／HTTP继续由 `smoke.py` 独立验证，开发者调用该脚本须显式 `PYTHONPATH=src`，该变量不传入冻结产品子进程。冻结探测不证明真实内容质量、GUI全部安装交互、macOS14最低系统、Windows／Linux或公开发行许可与签名。
+
+## OCR 权重组件与运行库（实施中）
+
+同一收据／安装器新增 `ocr_det`、`ocr_cls`、`ocr_rec`，作为不可执行资源处理；三份须同一构建／目录、整体存在，使用有界描述符读取和哈希核验，执行位、链接及不完整组合拒绝。已有工具收据保持兼容，浏览器／媒体仍要求执行位，资源没有给任意文件执行授权。
+
+`runtime_ocr.py` 固定RapidOCR3.9.2／ONNX Runtime1.30.0 CPU及三权重hash；读取收据匹配的快照，期间版本改变则拒绝，将快照放在已与资料库隔离的运行目录中，初始化内存session后清理临时副本。模型不从默认缓存、其他项目目录或网络替代。安装成功仍只报告静态校验，不自动启用识别或云请求。
+
+开发者从固定wheel生成七成员普通ZIP，保留上游模型索引、RapidOCR与PaddleOCR原许可及明确的未完成再分发审查。权重来源hash与wheel RECORD及上游版本索引一致，不冒充上游数字签名验证。现有原生构建尚未携带OCR运行库／该归档；清单条件缺失时不可安装。`build.py`的OCR原生封装、无需Python的真实加载和三端包仍待实现，不能用开发环境结果代替。
+
+以下是开发者源码验证，不是新用户安装教程；输出都必须新建在仓库外：
+
+```bash
+PYTHONPATH=src python tools/native_distribution/ocr_package.py \
+  --notices /absolute/verified-upstream-notices --output /absolute/new-component
+PYTHONPATH=src python tools/native_distribution/ocr_runtime_smoke.py \
+  --package /absolute/fixed-ocr-component.zip --output /absolute/new-stage \
+  --font /absolute/ordinary-developer-fixture-font
+```
+
+后者通过同一安装器实际安装固定权重，加载真实CPU session并识别六张原创中英文页；对Python socket连接／DNS进行拒绝审计，不借用户模型Key、来源登录或资料库。测试字体只用于开发者生成样例，不进入产品包。关键词命中不是全文字符准确率，也不代表真实视频、GPU、服务器资源约束或其他系统已验收。

@@ -21,10 +21,10 @@ MEDIA_TOOLS = {
 }
 
 
-def bundled_media_archive() -> Path:
+def bundled_component_archive(filename: str, size: int) -> Path:
     if not getattr(sys, "frozen", False):
         raise ContextError(
-            "runtime_component_not_bundled", "请使用带媒体组件的独立程序；不会从源码地址下载二进制。"
+            "runtime_component_not_bundled", "请使用带所选组件的独立程序；不会从源码地址下载组件。"
         )
     executable = Path(sys.executable)
     # PyInstaller's macOS resource aliases are not traversed. Use the real
@@ -39,25 +39,27 @@ def bundled_media_archive() -> Path:
     else:
         value = getattr(sys, "_MEIPASS", None)
         if not isinstance(value, str):
-            raise ContextError("runtime_component_not_bundled", "此程序没有媒体组件资源；不会联网替代。")
+            raise ContextError("runtime_component_not_bundled", "此程序没有所选组件资源；不会联网替代。")
         base = Path(value)
-    path = base / "native_software" / MEDIA_FILENAME
+    path = base / "native_software" / filename
     try:
         _absolute(path)
         info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != MEDIA_BYTES:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size != size:
             raise OSError
     except FileNotFoundError:
         raise ContextError(
-            "runtime_component_not_bundled", "此独立程序未携带媒体组件，请使用对应安装包。"
+            "runtime_component_not_bundled", "此独立程序未携带所选组件，请使用对应安装包。"
         ) from None
     except (ContextError, OSError):
-        raise ContextError(
-            "runtime_component_invalid", "随包媒体组件的路径或大小不符；不会联网替代。"
-        ) from None
+        raise ContextError("runtime_component_invalid", "随包组件的路径或大小不符；不会联网替代。") from None
     # RuntimeInstaller takes a descriptor-checked snapshot and verifies the
     # entire compiled size/hash before unpacking. This lookup is metadata only.
     return path
+
+
+def bundled_media_archive() -> Path:
+    return bundled_component_archive(MEDIA_FILENAME, MEDIA_BYTES)
 
 
 def bundled_media_state() -> str:

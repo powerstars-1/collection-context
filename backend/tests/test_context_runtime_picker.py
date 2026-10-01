@@ -39,6 +39,17 @@ def test_bundled_details_show_both_storage_sizes_and_no_binary_download_url():
     assert "功能未验证" in description
 
 
+def test_ocr_bundle_description_distinguishes_package_source_and_engine_missing():
+    item = {
+        **options()["artifacts"][0],
+        "source_url_kind": "upstream_package_not_binary_download",
+        "state": "ocr_runtime_missing",
+    }
+    description = runtime_catalog_description({"artifacts": [item]})
+    assert "来源地址是上游软件包页面" in description
+    assert "缺少固定CPU OCR运行库" in description and "上游源码" not in description
+
+
 def picker(monkeypatch):
     widgets = []
     focus = []

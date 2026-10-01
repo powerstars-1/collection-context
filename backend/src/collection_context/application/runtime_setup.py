@@ -35,6 +35,14 @@ from collection_context.infrastructure.runtime_media_layout import (
     MEDIA_TOOLS,
     bundled_media_state,
 )
+from collection_context.infrastructure.runtime_ocr import OCR_BUILD, OCR_MODELS, OCR_SOURCE, ocr_engine_state
+from collection_context.infrastructure.runtime_ocr_layout import (
+    OCR_BYTES,
+    OCR_ID,
+    OCR_PAYLOAD_BYTES,
+    OCR_SHA256,
+    bundled_ocr_state,
+)
 
 HEADLESS_ID = "chromium-headless-macos-arm64-1243"
 CATALOG = MappingProxyType(
@@ -108,11 +116,33 @@ CATALOG = MappingProxyType(
                 for role, (size, digest) in MEDIA_TOOLS.items()
             ),
         ),
+        OCR_ID: ArtifactPlan(
+            id=OCR_ID,
+            host_system="Darwin",
+            host_arch="arm64",
+            version="3.9.2",
+            source_url=OCR_SOURCE,
+            sha256=OCR_SHA256,
+            bytes=OCR_BYTES,
+            archive_type="zip",
+            tools=tuple(
+                ToolSpec(
+                    role=role,
+                    relative_path="models/" + filename,
+                    bytes=size,
+                    sha256=digest,
+                    version="3.9.2",
+                    license_id="LicenseRef-OCR-Development",
+                    build_version=OCR_BUILD,
+                )
+                for role, (filename, size, digest) in OCR_MODELS.items()
+            ),
+        ),
     }
 )
 
 
-def _availability(*, browser: bool = True) -> str:
+def _host_availability() -> str:
     arch = platform.machine().lower()
     if platform.system() != "Darwin" or arch not in {"arm64", "aarch64"}:
         return "host_not_available"
@@ -121,6 +151,13 @@ def _availability(*, browser: bool = True) -> str:
             return "os_version_not_available"
     except (ValueError, IndexError):
         return "os_version_not_verified"
+    return "available"
+
+
+def _availability(*, browser: bool = True) -> str:
+    state = _host_availability()
+    if state != "available":
+        return state
     if not browser:
         return bundled_media_state()
     try:
@@ -129,6 +166,16 @@ def _availability(*, browser: bool = True) -> str:
     except metadata.PackageNotFoundError:
         return "sdk_missing"
     return "available"
+
+
+def _ocr_availability() -> str:
+    host = _host_availability()
+    if host != "available":
+        return host
+    engine = ocr_engine_state()
+    if engine != "available_not_functionally_verified":
+        return engine
+    return bundled_ocr_state()
 
 
 def runtime_options() -> dict[str, Any]:
@@ -181,9 +228,26 @@ def runtime_options() -> dict[str, Any]:
                 "license_notice": "随包保留完整FFmpeg源码、LGPL许可及构建／签名材料；不联网下载，发行许可与签名仍待完成",
                 "functional_verified": False,
             },
+            {
+                "id": OCR_ID,
+                "name": "本地CPU OCR（固定运行库及随包权重开发候选）",
+                "state": _ocr_availability(),
+                "host_system": "Darwin",
+                "host_arch": "arm64",
+                "minimum_macos": "14",
+                "download_bytes": 0,
+                "archive_bytes": OCR_BYTES,
+                "payload_bytes": OCR_PAYLOAD_BYTES,
+                "delivery": "bundled",
+                "source_url": OCR_SOURCE,
+                "source_url_kind": "upstream_package_not_binary_download",
+                "license_notice": "保留RapidOCR与PaddleOCR原许可及权重来源；转换权重的公开再分发审查未完成",
+                "functional_verified": False,
+            },
         ],
         "not_available": ([] if _availability(browser=False) == "available" else ["ffmpeg_pair"])
-        + ["ocr_weights", "Windows", "Linux"],
+        + ([] if _ocr_availability() == "available" else ["ocr_weights"])
+        + ["Windows", "Linux"],
         "auto_install": False,
         "grants_sync_or_model_authority": False,
     }
@@ -201,7 +265,8 @@ def install_runtime(
         raise ContextError("runtime_install_catalog", "安装项不属于固定产品清单；未下载。")
     if installation_confirmed is not True:
         raise ContextError("runtime_install_confirmation", "请先查看清单并明确确认组件安装。")
-    if _availability(browser=artifact_id != MEDIA_ID) != "available":
+    state = _ocr_availability() if artifact_id == OCR_ID else _availability(browser=artifact_id != MEDIA_ID)
+    if state != "available":
         raise ContextError("runtime_install_unavailable", "当前系统、版本或运行库不满足此安装项。")
     with RuntimeDownloads(runtime_dir, catalog=CATALOG, stop=stop) as source:
         installer = RuntimeInstaller(

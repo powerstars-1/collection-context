@@ -516,6 +516,8 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
         "os_version_not_verified": "本机系统版本尚未确认",
         "sdk_version_mismatch": "浏览器运行库版本不匹配",
         "sdk_missing": "缺少浏览器运行库",
+        "ocr_runtime_missing": "缺少固定CPU OCR运行库",
+        "ocr_runtime_version_mismatch": "CPU OCR运行库版本与固定权重组合不匹配",
         "bundled_component_missing": "此程序未携带该组件，请使用含组件的安装包",
         "bundled_component_invalid": "随包组件校验前置条件不符，不可安装",
     }
@@ -551,7 +553,12 @@ def runtime_catalog_description(options: dict[str, Any]) -> str:
                 ),
                 "交付方式："
                 + (
-                    "随包携带，无网络下载；来源地址是上游源码"
+                    "随包携带，无网络下载；来源地址是"
+                    + (
+                        "上游软件包页面"
+                        if item.get("source_url_kind") == "upstream_package_not_binary_download"
+                        else "上游源码"
+                    )
                     if item.get("delivery") == "bundled"
                     else "固定HTTPS下载"
                 ),
@@ -907,7 +914,13 @@ class _DesktopWindow:
             f"仅安装：{choice['name']}\n"
             f"下载体积：{choice['download_bytes']:,} 字节\n来源：{choice['source_url']}\n"
             + (
-                "随包携带，无网络下载；以上地址是上游源码，不是二进制下载地址。\n"
+                "随包携带，无网络下载；以上地址是"
+                + (
+                    "上游软件包页面"
+                    if choice.get("source_url_kind") == "upstream_package_not_binary_download"
+                    else "上游源码"
+                )
+                + "，不是组件下载地址。\n"
                 if choice.get("delivery") == "bundled"
                 else ""
             )

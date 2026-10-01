@@ -28,6 +28,9 @@ RECEIPT_NAME = "runtime-dependencies.json"
 MAX_RECEIPT_BYTES = 65_536
 MAX_TOOL_BYTES = 1_073_741_824
 TOOL_ROLES = frozenset({"ffmpeg", "ffprobe", "chromium", "chromium_headless_shell"})
+MODEL_ROLES = frozenset({"ocr_det", "ocr_cls", "ocr_rec"})
+DEPENDENCY_ROLES = TOOL_ROLES | MODEL_ROLES
+MAX_MODEL_BYTES = 64_000_000
 BROWSER_ROLES = frozenset({"chromium", "chromium_headless_shell"})
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -277,7 +280,7 @@ class RuntimeDependencies:
                 or not isinstance(receipt["host"], dict)
                 or set(receipt["host"]) != {"system", "arch"}
                 or not isinstance(receipt["tools"], dict)
-                or not set(receipt["tools"]).issubset(TOOL_ROLES)
+                or not set(receipt["tools"]).issubset(DEPENDENCY_ROLES)
             ):
                 raise ValueError
             if receipt["host"] != _host():
@@ -291,6 +294,8 @@ class RuntimeDependencies:
                 if (
                     type(tool["bytes"]) is not int
                     or not 0 < tool["bytes"] <= MAX_TOOL_BYTES
+                    or role in MODEL_ROLES
+                    and tool["bytes"] > MAX_MODEL_BYTES
                     or not isinstance(tool["sha256"], str)
                     or not _SHA256.fullmatch(tool["sha256"])
                     or any(
@@ -317,6 +322,13 @@ class RuntimeDependencies:
                     ):
                         raise ValueError
             tools = receipt["tools"]
+            model_roles = MODEL_ROLES.intersection(tools)
+            if model_roles and (
+                model_roles != MODEL_ROLES
+                or len({tools[role]["build_version"] for role in MODEL_ROLES}) != 1
+                or len({tools[role]["relative_path"].rsplit("/", 1)[0] for role in MODEL_ROLES}) != 1
+            ):
+                raise ValueError
             if ("ffmpeg" in tools) != ("ffprobe" in tools):
                 raise ValueError
             if "ffmpeg" in tools and tools["ffmpeg"]["build_version"] != tools["ffprobe"]["build_version"]:
@@ -336,7 +348,7 @@ class RuntimeDependencies:
             raise _error("runtime_dependency_invalid") from None
 
     def resolve(self, role: str) -> ToolDependency:
-        if not isinstance(role, str) or role not in TOOL_ROLES:
+        if not isinstance(role, str) or role not in DEPENDENCY_ROLES:
             raise _error("runtime_dependency_invalid")
         tool = self._receipt()["tools"].get(role)
         if tool is None:
@@ -358,7 +370,9 @@ class RuntimeDependencies:
             if info.st_size != tool["bytes"]:
                 raise _error("runtime_dependency_integrity")
             path = self.runtime_dir.joinpath(*_relative(tool["relative_path"]))
-            if not info.st_mode & 0o111 or not os.access(path, os.X_OK):
+            if role in TOOL_ROLES and (not info.st_mode & 0o111 or not os.access(path, os.X_OK)):
+                raise _error("runtime_dependency_unsafe")
+            if role in MODEL_ROLES and info.st_mode & 0o111:
                 raise _error("runtime_dependency_unsafe")
             hasher = hashlib.sha256()
             count = 0
@@ -383,3 +397,27 @@ class RuntimeDependencies:
             playwright_package_version=binding.get("package_version"),
             playwright_revision=binding.get("revision"),
         )
+
+    def read_model(self, role: str) -> bytes:
+        """Return a bounded, descriptor-verified snapshot, not a mutable model path.
+
+        Resource roles never grant executable permission. Each call checks the
+        receipt again and verifies the exact bytes consumed by the OCR loader.
+        """
+        if not isinstance(role, str) or role not in MODEL_ROLES:
+            raise _error("runtime_dependency_invalid")
+        tool = self._receipt()["tools"].get(role)
+        if tool is None:
+            raise _error("runtime_dependency_missing")
+        with self._open(tool["relative_path"]) as (fd, info):
+            if info.st_mode & 0o111 or info.st_size != tool["bytes"]:
+                raise _error("runtime_dependency_unsafe")
+            body = bytearray()
+            while len(body) <= tool["bytes"]:
+                chunk = os.read(fd, min(1_048_576, tool["bytes"] + 1 - len(body)))
+                if not chunk:
+                    break
+                body.extend(chunk)
+            if len(body) != tool["bytes"] or hashlib.sha256(body).hexdigest() != tool["sha256"]:
+                raise _error("runtime_dependency_integrity")
+        return bytes(body)
