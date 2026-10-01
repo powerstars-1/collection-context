@@ -1,4 +1,5 @@
 """React UI keeps one original backend and its authentication boundaries."""
+
 from html.parser import HTMLParser
 from pathlib import Path
 

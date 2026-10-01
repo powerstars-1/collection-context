@@ -123,9 +123,7 @@ class LibraryStore:
             files.write(f".context/索引/{index_version}.json", index)
             files.write(
                 ".context/索引/CURRENT.json",
-                canonical_bytes(
-                    {"version": index_version, "sha256": hashlib.sha256(index).hexdigest()}
-                ),
+                canonical_bytes({"version": index_version, "sha256": hashlib.sha256(index).hexdigest()}),
             )
         return cls(root)
 

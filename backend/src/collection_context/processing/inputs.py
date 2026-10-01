@@ -305,7 +305,12 @@ class PreparedInputs:
         except (KeyError, TypeError, ValueError, OverflowError):
             raise ContextError("invalid_input", "输入清单结构、范围或证据身份无效。") from None
 
-    def load(self, identity: str) -> dict[str, Any]:
+    def manifest(self, identity: str) -> dict[str, Any]:
+        """Validate the registered immutable manifest without loading retained media.
+
+        Callers must verify each blob they actually use. Extraction and reuse continue
+        to use load(), which also verifies every retained original.
+        """
         valid_id(identity)
         registered = self.store.snapshot().get("prepared_inputs", {}).get(identity)
         if not registered:
@@ -323,6 +328,10 @@ class PreparedInputs:
                 raise ValueError
         except (TypeError, ValueError):
             raise ContextError("invalid_input", "输入清单身份或结构无效。") from None
+        return payload
+
+    def load(self, identity: str) -> dict[str, Any]:
+        payload = self.manifest(identity)
         for blob in payload["originals"]:
             self._read_blob(
                 payload["material_ref"], blob

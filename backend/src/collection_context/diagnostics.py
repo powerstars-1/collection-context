@@ -8,6 +8,7 @@ import os
 import platform
 import shutil
 import socket
+import stat
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -74,48 +75,106 @@ def _python_dependency(
     }
 
 
-def _playwright_browser() -> dict[str, Any]:
-    spec = importlib.util.find_spec("playwright")
-    package = spec is not None
-    available = False
-    if spec is not None:
-        try:
+def _unlinked_file(path: Path) -> bool:
+    """Conservative static check only; this does not authorize executing a file."""
+    try:
+        if not path.is_absolute() or any(part.is_symlink() for part in (path, *path.parents)):
+            return False
+        return stat.S_ISREG(path.stat().st_mode)
+    except OSError:
+        return False
+
+
+def _browser_revisions(package_root: Path) -> dict[str, str]:
+    manifest = package_root / "driver" / "package" / "browsers.json"
+    if not _unlinked_file(manifest):
+        raise ValueError
+    # Bound the read itself, not merely the file's earlier stat size.
+    with manifest.open("rb") as stream:
+        data = stream.read(65_537)
+    if len(data) > 65_536:
+        raise ValueError
+    payload = json.loads(data)
+    browsers = payload["browsers"]
+    if not isinstance(browsers, list) or len(browsers) > 32:
+        raise ValueError
+    names = {"chromium", "chromium-headless-shell"}
+    revisions: dict[str, str] = {}
+    for browser in browsers:
+        if not isinstance(browser, dict):
+            raise ValueError
+        name = browser.get("name")
+        if name not in names:
+            continue
+        revision = browser.get("revision")
+        if (
+            name in revisions
+            or not isinstance(revision, str)
+            or not revision.isascii()
+            or not revision.isdecimal()
+            or not 1 <= len(revision) <= 12
+            or browser.get("revisionOverrides")
+        ):
+            # Host-specific overrides require the official registry; never guess.
+            raise ValueError
+        revisions[name] = revision
+    if set(revisions) != names or len(set(revisions.values())) != 1:
+        raise ValueError
+    return revisions
+
+
+def _playwright_browser(*, sdk: Any = None) -> dict[str, Any]:
+    """No driver/browser startup, downloads, network, or profile creation.
+
+    An already initialized SDK may be injected by an explicit diagnostic caller.
+    Only its public Chromium executable_path is consulted. The SDK exposes no
+    public default headless-shell executable_path, so that role stays unverified.
+    """
+    package = False
+    manifest_verified = False
+    desktop = {"state": "not_verified", "static_available": False, "runtime_verified": False}
+    headless = {"state": "not_verified", "static_available": False, "runtime_verified": False}
+    try:
+        spec = importlib.util.find_spec("playwright")
+        package = spec is not None
+        if spec is not None:
             package_root = Path(next(iter(spec.submodule_search_locations or [])))
-            manifest = json.loads(
-                (package_root / "driver" / "package" / "browsers.json").read_text(encoding="utf-8")
-            )
-            revision = next(
-                item["revision"] for item in manifest["browsers"] if item["name"] == "chromium"
-            )
-            configured = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
-            if configured == "0":
-                cache = package_root / "driver" / "package" / ".local-browsers"
-            elif configured:
-                cache = Path(configured).expanduser()
-            elif sys.platform == "darwin":
-                cache = Path.home() / "Library" / "Caches" / "ms-playwright"
-            elif sys.platform == "win32":
-                cache = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-                cache /= "ms-playwright"
-            else:
-                cache = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-                cache /= "ms-playwright"
-            runtime = cache / f"chromium-{revision}"
-            available = runtime.is_dir() and any(runtime.iterdir())
-        except (OSError, ValueError, KeyError, StopIteration, TypeError):
-            available = False
+            revisions = _browser_revisions(package_root)
+            manifest_verified = True
+            if sdk is not None:
+                # No launch(), sync_playwright(), private registry or guessed
+                # per-platform executable layout. SDK ownership stays with caller.
+                path = Path(sdk.chromium.executable_path)
+                if not _unlinked_file(path):
+                    desktop["state"] = "missing_or_unsafe"
+                elif f"chromium-{revisions['chromium']}" not in {p.name for p in path.parents}:
+                    desktop["state"] = "revision_not_verified"
+                elif not os.access(path, os.X_OK):
+                    desktop["state"] = "not_executable"
+                else:
+                    desktop.update(state="static_available", static_available=True)
+    except Exception:
+        # Import/manifest/SDK errors may carry local paths or environment values.
+        # Do not echo them or treat any failed check as readiness.
+        desktop.update(state="not_verified", static_available=False)
+    try:
+        package_version = _version("playwright") if package else None
+    except Exception:
+        package_version = None
     return {
         "role": "source_browser",
-        "available": available,
+        "available": False,
+        "static_available": False,
+        "runtime_verified": False,
         "required_for_start": False,
-        "version": _version("playwright") if package else None,
+        "version": package_version,
+        "package_present": package,
         "package_available": package,
-        "runtime_check": "matching_cached_revision",
-        "next_action": (
-            None
-            if available
-            else "需要来源连接时，先安装 browser 依赖，再明确执行 Playwright Chromium 安装。"
-        ),
+        "manifest_verified": manifest_verified,
+        "desktop": desktop,
+        "headless": headless,
+        "runtime_check": "static_only_no_process_started",
+        "next_action": "浏览器未功能探测；需要来源连接时再显式检查匹配运行文件与启动能力。",
     }
 
 
@@ -154,9 +213,7 @@ def dependency_report() -> dict[str, Any]:
             "required_for_start": False,
             "version": None,
             "next_action": (
-                None
-                if ffmpeg_ready
-                else "需要处理视频时，单独安装 FFmpeg；启动器不会自动下载。"
+                None if ffmpeg_ready else "需要处理视频时，单独安装 FFmpeg；启动器不会自动下载。"
             ),
         },
         {

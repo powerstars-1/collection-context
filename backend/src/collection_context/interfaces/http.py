@@ -16,7 +16,9 @@ from collection_context.application.agent_addition import AgentAdditionGateway
 from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError, canonical_bytes, envelope
 from collection_context.application.gateway import ReadGateway, http_status
+from collection_context.application.library_management import LibraryManagement
 from collection_context.application.management import ManagementService
+from collection_context.application.media_evidence import MediaEvidence
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.secrets import FileSecrets
 from collection_context.interfaces.access import AccessRegistry
@@ -253,6 +255,7 @@ def create_app(
         raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
     store = LibraryStore(workspace)
     gateway = ReadGateway(ContextService(store))
+    media_evidence = MediaEvidence(store)
     addition = AdditionWorkflow(store, agent_authority=AccessRegistry(store).authorize_add)
     try:
         management = ManagementService(
@@ -382,6 +385,95 @@ def create_app(
 
     status.__annotations__["request"] = Request
     app.add_api_route("/v1/collections/{material_ref}/status", status, methods=["GET"])
+
+    async def frame_list(material_ref: str, request):
+        if request.query_params:
+            raise ContextError("invalid_argument", "画面读取不接收任意路径或查询参数。")
+        data = await run_in_threadpool(media_evidence.listing, material_ref)
+        return result_response(envelope(data))
+
+    frame_list.__annotations__["request"] = Request
+    app.add_api_route("/v1/collections/{material_ref}/frames", frame_list, methods=["GET"])
+
+    async def frame_image(material_ref: str, input_id: str, frame_id: str, request):
+        if request.query_params:
+            raise ContextError("invalid_argument", "画面读取不接收任意路径或查询参数。")
+        image, mime = await run_in_threadpool(media_evidence.image, material_ref, input_id, frame_id)
+        return Response(image, media_type=mime)
+
+    frame_image.__annotations__["request"] = Request
+    app.add_api_route(
+        "/v1/collections/{material_ref}/frames/{input_id}/{frame_id}", frame_image, methods=["GET"]
+    )
+
+    async def library_manage(action: str, request):
+        value = await body(request)
+
+        def authorize_owner():
+            if refresh is not None:
+                refresh()
+            credential, session = policy.session(request.cookies.get(COOKIE_NAME))
+            if (
+                "ui:manage" not in credential.permissions
+                or credential.principal != request.state.credential.principal
+                or session is not request.state.session
+            ):
+                raise ContextError("permission_denied", "资料管理需要有效的主人页面会话。")
+
+        controller = LibraryManagement(store, authorize=authorize_owner)
+        allowed = {
+            "overview": set(),
+            "excluded": {"offset", "limit", "version"},
+            "exclusion-preview": {"material_ref", "excluded"},
+            "exclusion-confirm": {"material_ref", "excluded", "preview_token", "confirmed"},
+            "export-preview": {"material_ref", "media_scope"},
+            "export": {"material_ref", "media_scope", "preview_token", "confirmed"},
+        }
+        if action not in allowed or set(value) - allowed[action]:
+            raise ContextError("invalid_argument", "资料管理只接收指定字段，不接收文件路径。")
+        for key in {"material_ref", "media_scope", "preview_token", "version"} & set(value):
+            if not isinstance(value[key], str) or len(value[key]) > 200:
+                raise ContextError("invalid_argument", "引用、范围和版本须为限定长度的文本。")
+        if action in {"exclusion-preview", "exclusion-confirm", "export-preview", "export"}:
+            required = allowed[action] - ({"media_scope"} if action == "export-preview" else set())
+            if not required <= set(value):
+                raise ContextError("invalid_argument", "资料管理缺少必要字段。")
+            ref = value["material_ref"]
+        if action == "overview":
+            result = await run_in_threadpool(controller.overview)
+        elif action == "excluded":
+            result = await run_in_threadpool(controller.excluded_items, **value)
+        elif action == "exclusion-preview":
+            result = await run_in_threadpool(controller.preview_exclusion, ref, excluded=value["excluded"])
+        elif action == "exclusion-confirm":
+            result = await run_in_threadpool(
+                controller.set_exclusion,
+                ref,
+                excluded=value["excluded"],
+                preview_token=value["preview_token"],
+                confirmed=value["confirmed"],
+            )
+        elif action == "export-preview":
+            result = await run_in_threadpool(
+                controller.export_preview, ref, media_scope=value.get("media_scope", "none")
+            )
+        else:
+            archive = await run_in_threadpool(
+                controller.export_archive,
+                ref,
+                media_scope=value["media_scope"],
+                preview_token=value["preview_token"],
+                confirmed=value["confirmed"],
+            )
+            return Response(
+                archive,
+                media_type="application/zip",
+                headers={"content-disposition": 'attachment; filename="collection-export.zip"'},
+            )
+        return result_response(envelope(result))
+
+    library_manage.__annotations__["request"] = Request
+    app.add_api_route("/v1/management/library/{action}", library_manage, methods=["POST"])
 
     async def manage(action: str, request):
         return result_response(await run_in_threadpool(management.dispatch, action, await body(request)))

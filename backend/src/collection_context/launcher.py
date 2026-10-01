@@ -73,7 +73,12 @@ def _prepare_workspace(path: Path, *, initialize_empty: bool) -> tuple[LibrarySt
     return LibraryStore(path), False
 
 
-def _ensure_owner_access(store: LibraryStore, output: TextIO) -> None:
+def _ensure_owner_access(
+    store: LibraryStore,
+    output: TextIO,
+    *,
+    owner_presenter: Callable[[str], bool] | None = None,
+) -> None:
     registry = AccessRegistry(store)
     records = registry.records()
     if any("ui:manage" in record["permissions"] for record in records):
@@ -85,6 +90,32 @@ def _ensure_owner_access(store: LibraryStore, output: TextIO) -> None:
         label = f"本机管理启动器 {suffix}"
         suffix += 1
     access = registry.create(label, ui=True, manage=True)
+    if owner_presenter is not None:
+        accepted = False
+        failed = False
+        try:
+            accepted = owner_presenter(access["token"]) is True
+        except BaseException:
+            # The exception can contain widget contents. Roll back without quoting it.
+            failed = True
+        finally:
+            if not accepted:
+                try:
+                    registry.revoke(access["principal"])
+                except BaseException:
+                    raise ContextError(
+                        "owner_rollback_failed",
+                        "首次口令未确认，撤销未能完成；服务未启动，请检查资料库访问规则。",
+                    ) from None
+        if not accepted:
+            raise ContextError(
+                "owner_presentation_failed" if failed else "owner_confirmation_cancelled",
+                "首次口令未能安全展示；本次新权限已撤销。"
+                if failed
+                else "首次口令保存已取消；本次新权限已撤销。",
+            ) from None
+        print("本机管理口令已通过本机窗口确认保存。", file=output)
+        return
     print("已创建本机管理口令。它只显示这一次，请现在保存：", file=output)
     print(access["token"], file=output)
     print("这个口令不是模型 API Key，不要粘贴到聊天、日志或公共仓库。", file=output)
@@ -103,7 +134,7 @@ def _wait_for_ready(
     while not stop.is_set() and time.monotonic() < deadline:
         try:
             with urllib.request.urlopen(health, timeout=0.5) as response:
-                if response.status == 200:
+                if response.status == 200 and not stop.is_set():
                     print(f"管理页已就绪：{url}", file=output)
                     if open_page is not None:
                         open_page(url)
@@ -123,9 +154,9 @@ def _print_capability_summary(report: dict[str, Any], output: TextIO) -> None:
     }
     print(
         "启动检查：管理页依赖已就绪；"
-        f"来源浏览器={'可用' if optional.get('source_browser') else '未就绪'}，"
-        f"FFmpeg={'可用' if optional.get('media_ffmpeg') else '未就绪'}，"
-        f"本地OCR={'可用' if optional.get('local_ocr') else '未就绪'}。",
+        "来源浏览器=待独立运行验证，"
+        f"FFmpeg={'已发现工具，待解码验证' if optional.get('media_ffmpeg') else '未发现工具'}，"
+        f"本地OCR={'已发现模块，待权重和推理验证' if optional.get('local_ocr') else '未发现模块'}。",
         file=output,
     )
     print("这些可选能力不会自动安装，也不会自动获得来源同步或模型调用授权。", file=output)
@@ -152,6 +183,15 @@ def _ordered_exit_signals(server):
             signal.signal(item, handler)
 
 
+def _watch_stop_request(server: Any, requested: threading.Event, finished: threading.Event) -> None:
+    """Bridge the desktop stop control to Uvicorn without killing another process."""
+    while not finished.is_set():
+        if requested.wait(0.1):
+            finished.set()
+            server.should_exit = True
+            return
+
+
 def launch(
     workspace: Path,
     *,
@@ -160,7 +200,11 @@ def launch(
     no_browser: bool,
     output: TextIO,
     open_page: Callable[[str], Any] = webbrowser.open,
+    owner_presenter: Callable[[str], bool] | None = None,
+    stop_event: threading.Event | None = None,
 ) -> int:
+    if stop_event is not None and stop_event.is_set():
+        return 0
     report = startup_report(workspace, port)
     if not report["capabilities"]["ready_for_management_page"]:
         raise ContextError("dependency_required", "管理页依赖未就绪；请安装本产品的 launcher 可选依赖。")
@@ -171,7 +215,10 @@ def launch(
     try:
         if created:
             print(f"已初始化新的产品资料库：{store.files.root}", file=output)
-        _ensure_owner_access(store, output)
+        _ensure_owner_access(store, output, owner_presenter=owner_presenter)
+        if stop_event is not None and stop_event.is_set():
+            print("启动已取消，资料库保持原位。", file=output)
+            return 0
         registry = AccessRegistry(store)
         origin = f"http://{LOOPBACK}:{port}"
         policy = AccessPolicy(origin, registry.credentials())
@@ -207,13 +254,24 @@ def launch(
             daemon=True,
         )
         ready.start()
+        watcher = None
+        if stop_event is not None:
+            watcher = threading.Thread(
+                target=_watch_stop_request,
+                args=(server, stop_event, stopped),
+                name="collection-context-desktop-stop",
+                daemon=True,
+            )
+            watcher.start()
         try:
             with _ordered_exit_signals(server):
                 server.run()
         finally:
             stopped.set()
             ready.join(timeout=2)
-        if not server.started:
+            if watcher is not None:
+                watcher.join(timeout=2)
+        if not server.started and not (stop_event is not None and stop_event.is_set()):
             raise ContextError("startup_failed", "管理页服务未成功启动。")
         print("管理页已停止，资料库保持原位。", file=output)
         return 0

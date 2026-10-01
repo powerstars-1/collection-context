@@ -1,0 +1,5 @@
+# Current macOS ARM64 development build. No browser or OCR runtime is installed.
+pyinstaller==6.22.3
+mcp==2.2.0
+fastapi==0.142.2
+uvicorn==0.54.0

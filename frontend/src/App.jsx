@@ -86,7 +86,7 @@ export default function App() {
       <div className="relative flex min-h-0 flex-1 overflow-hidden bg-white/55">
         <SubNav page={navPage} active={sub} onChange={onSub} density={density}/>
         <main id="main-content" className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(255,255,255,0.40),rgba(248,250,252,0.76))]">
-          {page==='materials'&&<Library api={client.request} sourceKind={kind}/>}
+          {page==='materials'&&<Library api={client.request} download={client.download} canManage={session.permissions.includes('ui:manage')} sourceKind={kind}/>}
           {page==='access'&&<div className="min-h-0 flex-1 overflow-y-auto"><Access/></div>}
           <div hidden={page==='materials'||page==='access'} className="min-h-0 flex-1 overflow-y-auto"><LegacyPanels/></div>
         </main>

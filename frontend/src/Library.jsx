@@ -2,6 +2,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { WorkbenchLayout } from './components/workbench/WorkbenchLayout';
 import { MaterialList } from './components/workbench/MaterialList';
+import { FrameGallery } from './FrameGallery';
+import { ItemTools, ExcludedItems, LibrarySpace } from './LibraryTools';
 
 export const sourceLabels = {liked:'喜欢',saved:'收藏',collection:'收藏夹',creator:'博主作品',link:'单条链接'};
 const artifactLabels = {original:'原文',audio:'转写',screen:'画面文字',summary:'总结',readable:'可读全文',image:'图片理解',user_note:'备注'};
@@ -19,7 +21,7 @@ function SourceAction({item}) {
   </div>;
 }
 
-function Evidence({api,item}) {
+function Evidence({api,download,item,canManage,onChanged}) {
   const [artifact,setArtifact] = useState('original');
   const [status,setStatus] = useState(null);
   const [read,setRead] = useState(null);
@@ -67,11 +69,13 @@ function Evidence({api,item}) {
       <pre id="evidence-text" className="mt-4 whitespace-pre-wrap break-words font-sans text-sm leading-7 text-zinc-700">{text || (!busy && !error ? '此项目前没有可读内容。缺失不代表原作品没有信息。':'')}</pre>
       {read?.next_offset!=null && <button type="button" className={button+' mt-4'} disabled={busy} onClick={()=>load(true)}>继续读取</button>}
     </div>
+    <FrameGallery api={api} materialRef={item.material_ref}/>
+    {canManage&&<ItemTools api={api} download={download} item={item} onChanged={onChanged}/>}
     {read && <details className="rounded-2xl border border-zinc-200 bg-white p-4"><summary className="cursor-pointer text-sm text-zinc-500">查看当前引用响应 JSON</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs text-zinc-600">{JSON.stringify(read,null,2)}</pre></details>}
   </div>;
 }
 
-export function Library({api,sourceKind=''}) {
+export function Library({api,download,canManage=false,sourceKind=''}) {
   const [query,setQuery] = useState(new URLSearchParams(location.search).get('q')||'');
   const [committedQuery,setCommittedQuery] = useState(query);
   const [items,setItems] = useState([]);
@@ -121,7 +125,9 @@ export function Library({api,sourceKind=''}) {
       {!busy&&!items.length&&!error && <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-500">当前范围没有资料。换一个关键词，或先去同步页添加作品。</div>}
       <MaterialList materials={materials} selectedIds={selectedId?[selectedId]:[]} onToggle={setSelectedId}/>
       {!committedQuery&&listing?.next_offset!=null && <button type="button" className={button} disabled={busy} onClick={()=>load(true)}>继续查看</button>}
+      {canManage&&<ExcludedItems api={api} download={download} onChanged={()=>load()}/>}
+      {canManage&&<LibrarySpace api={api}/>}
     </div>}
-    main={item?<Evidence key={item.material_ref} item={item} api={api}/>:<div className="rounded-3xl border border-zinc-200 bg-white p-6"><div className="text-xs text-zinc-400">你的收藏上下文</div><h2 className="mt-2 text-lg font-semibold text-zinc-900">选一条资料，查看完整内容。</h2><p className="mt-3 text-sm leading-7 text-zinc-500">原文、转写、画面文字和总结分开保存与阅读。每一条回答都能回到来源，缺失项和处理状态如实显示。</p><p className="mt-4 text-xs text-zinc-400">喜欢与收藏是兴趣线索，不自动等同于你的观点或已掌握的知识。</p></div>}
+    main={item?<Evidence key={item.material_ref} item={item} api={api} download={download} canManage={canManage} onChanged={()=>load()}/>:<div className="rounded-3xl border border-zinc-200 bg-white p-6"><div className="text-xs text-zinc-400">你的收藏上下文</div><h2 className="mt-2 text-lg font-semibold text-zinc-900">选一条资料，查看完整内容。</h2><p className="mt-3 text-sm leading-7 text-zinc-500">原文、转写、画面文字和总结分开保存与阅读。每一条回答都能回到来源，缺失项和处理状态如实显示。</p><p className="mt-4 text-xs text-zinc-400">喜欢与收藏是兴趣线索，不自动等同于你的观点或已掌握的知识。</p></div>}
   />;
 }

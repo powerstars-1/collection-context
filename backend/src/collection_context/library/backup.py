@@ -17,12 +17,15 @@ from collection_context.application.contracts import (
     SCHEMA_VERSION,
     ContextError,
     canonical_bytes,
+    digest,
     utc_now,
     valid_id,
 )
 from collection_context.infrastructure.files import SafeFiles
+from collection_context.infrastructure.ownership import ExecutorLease
 from collection_context.library.index import FileIndex
 from collection_context.library.store import LEGACY_GUARD, WRITER_PROTOCOL, LibraryStore
+from collection_context.processing.inputs import PreparedInputs
 
 BACKUP_VERSION = 1
 MAX_FILES = 10_000
@@ -31,6 +34,26 @@ MAX_FILE_BYTES = 512_000_000
 MANIFEST_NAME = "backup-manifest.json"
 STATE_NAME = "library-state.json"
 FILES_PREFIX = "files/"
+ARTIFACT_FILENAMES = {
+    "original": "原文",
+    "audio": "音频转写",
+    "screen": "画面文字",
+    "summary": "内容总结",
+    "readable": "可读内容",
+    "image": "图片提取",
+    "user_note": "用户备注",
+}
+
+
+def _artifact_path(ref: str, kind: str, artifact: dict[str, Any]) -> str:
+    try:
+        version = valid_id(artifact["version"])
+        expected = f"content-vault/80_附件/抖音/{valid_id(ref)}/{version}/{ARTIFACT_FILENAMES[kind]}.md"
+        if artifact["path"] != expected:
+            raise ValueError
+        return expected
+    except (KeyError, TypeError, ValueError):
+        raise ContextError("forbidden_path", "产物位置与固定资料身份不符；未读取或备份。") from None
 
 
 def _sha256(body: bytes) -> str:
@@ -85,6 +108,10 @@ def _add_file(files: dict[str, bytes], path: str, body: bytes) -> None:
     SafeFiles.parts(path)
     if len(body) > MAX_FILE_BYTES:
         raise ContextError("backup_file_limit", "单个备份文件超过当前验证上限。")
+    if path not in files and (
+        len(files) >= MAX_FILES or sum(map(len, files.values())) + len(body) > MAX_TOTAL_BYTES
+    ):
+        raise ContextError("backup_size_limit", "备份文件数或总大小超过当前验证上限。")
     previous = files.setdefault(path, body)
     if previous != body:
         raise ContextError("backup_path_conflict", "备份中同一路径对应不同内容。")
@@ -92,15 +119,15 @@ def _add_file(files: dict[str, bytes], path: str, body: bytes) -> None:
 
 def _collect_files(
     store: LibraryStore, state: dict[str, Any], *, include_media: bool
-) -> tuple[
-    dict[str, bytes], list[dict[str, Any]], list[dict[str, str]], dict[str, str]
-]:
+) -> tuple[dict[str, bytes], list[dict[str, Any]], list[dict[str, str]], dict[str, str]]:
     files: dict[str, bytes] = {}
     omitted: list[dict[str, Any]] = []
     entry_gaps: list[dict[str, str]] = []
     generated_entries = FileIndex(store).generated_entries()
     retained_tracking: dict[str, str] = {}
     for ref, item in state["items"].items():
+        if valid_id(ref) != item.get("id"):
+            raise ContextError("invalid_input", "条目身份与资料键不一致；未生成备份。")
         entry_path = FileIndex.readable_path(ref)
         try:
             entry_body = store.files.read(entry_path, max_bytes=2_000_000)
@@ -136,19 +163,33 @@ def _collect_files(
             else:
                 retained_tracking[entry_path] = tracked
         _add_file(files, entry_path, entry_body)
-        for artifact in item["artifacts"].values():
-            body = store.files.read(artifact["path"], max_bytes=MAX_FILE_BYTES)
+        for kind, artifact in item["artifacts"].items():
+            # Backup retains stale artifacts, including former audio from a now-silent video.
+            # Use fixed identity paths rather than semantic read eligibility.
+            body = store.files.read(_artifact_path(ref, kind, artifact), max_bytes=2_000_000)
             if _sha256(body) != artifact["sha256"]:
                 raise ContextError("artifact_changed", "产物文件与提交清单不符；未生成备份。")
+            try:
+                body.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ContextError("invalid_artifact", "产物不是有效文本；未生成备份。") from None
             _add_file(files, artifact["path"], body)
     for identity, record in state.get("prepared_inputs", {}).items():
         valid_id(identity)
-        manifest_body = store.files.read(record["path"], max_bytes=2_000_000)
+        expected_path = f".context/输入/{identity}.json"
+        if record.get("path") != expected_path:
+            raise ContextError("forbidden_path", "媒体清单不在固定身份位置；未生成备份。")
+        manifest_body = store.files.read(expected_path, max_bytes=2_000_000)
         if _sha256(manifest_body) != record["sha256"]:
             raise ContextError("media_changed", "媒体输入清单已改变；未生成备份。")
         try:
             payload = json.loads(manifest_body)
-            if payload["material_ref"] != record["material_ref"]:
+            PreparedInputs._validate(payload)
+            if (
+                payload["material_ref"] != record["material_ref"]
+                or payload["material_ref"] not in state["items"]
+                or identity != "u_" + digest(payload)
+            ):
                 raise ValueError
             blobs = [*payload["originals"]]
             blobs.extend(segment["blob"] for segment in payload["audio"])
@@ -156,14 +197,15 @@ def _collect_files(
         except (ValueError, TypeError, KeyError):
             raise ContextError("invalid_input", "媒体输入清单损坏；未生成备份。") from None
         if include_media:
-            _add_file(files, record["path"], manifest_body)
+            _add_file(files, expected_path, manifest_body)
         for blob in blobs:
-            body = store.files.read(blob["path"], max_bytes=MAX_FILE_BYTES)
-            if len(body) != blob["bytes"] or _sha256(body) != blob["sha256"]:
-                raise ContextError("media_changed", "媒体快照与清单不符；未生成备份。")
+            # Also validates the exact content hash, extension and owning material identity.
+            body = PreparedInputs(store)._read_blob(payload["material_ref"], blob)
             if include_media:
                 _add_file(files, blob["path"], body)
             else:
+                if len(omitted) >= MAX_FILES:
+                    raise ContextError("backup_size_limit", "省略媒体清单超过当前文件数上限。")
                 omitted.append(
                     {
                         "path": blob["path"],
@@ -182,9 +224,7 @@ def _collect_files(
     )
 
 
-def create_backup(
-    store: LibraryStore, output: Path, *, media_scope: str
-) -> dict[str, Any]:
+def create_backup(store: LibraryStore, output: Path, *, media_scope: str) -> dict[str, Any]:
     if media_scope not in {"all", "none"}:
         raise ContextError("invalid_argument", "媒体范围须明确为 all 或 none。")
     output = _external_path(store, output, kind="备份输出")
@@ -192,12 +232,12 @@ def create_backup(
         raise ContextError("backup_destination_invalid", "备份目标须是库外已存在目录中的新文件。")
     temporary: Path | None = None
     try:
-        with store.writer():
+        # Match execution's lease order. Auto switches cannot revoke an already-sent request;
+        # this live kernel lease blocks backup until the actual executor releases ownership.
+        with ExecutorLease(store.files.root) as executor, store.writer():
             state = store.snapshot()
             if state["settings"].get("auto_sync") is True or state["settings"].get("auto_process") is True:
-                raise ContextError(
-                    "backup_requires_pause", "请先关闭自动同步和自动处理，再创建一致备份。"
-                )
+                raise ContextError("backup_requires_pause", "请先关闭自动同步和自动处理，再创建一致备份。")
             files, omitted, entry_gaps, generated_entry_hashes = _collect_files(
                 store, state, include_media=media_scope == "all"
             )
@@ -238,12 +278,12 @@ def create_backup(
                 archive.writestr(STATE_NAME, state_body)
                 for path, body in sorted(files.items()):
                     archive.writestr(FILES_PREFIX + path, body)
+            executor.check()
+            store.files.check_root()
             try:
                 os.link(temporary, output)
             except FileExistsError:
-                raise ContextError(
-                    "backup_destination_invalid", "备份目标已存在，未覆盖。"
-                ) from None
+                raise ContextError("backup_destination_invalid", "备份目标已存在，未覆盖。") from None
             except OSError:
                 raise ContextError(
                     "storage_unavailable", "备份无法原子发布到目标目录，未留下半成品。"
@@ -261,6 +301,7 @@ def create_backup(
                 "readable_entry_gaps": entry_gaps,
                 "sha256": _file_sha256(output),
                 "automation_restored": False,
+                "snapshot_protection": "live_executor_and_writer_leases",
             }
     finally:
         if temporary is not None:
@@ -353,45 +394,36 @@ def _validate_state(state: dict[str, Any], workspace_id: str) -> None:
 def _validate_references(
     state: dict[str, Any], files: dict[str, bytes], generated_entries: dict[str, str]
 ) -> None:
-    filenames = {
-        "original": "原文",
-        "audio": "音频转写",
-        "screen": "画面文字",
-        "summary": "内容总结",
-        "readable": "可读内容",
-        "image": "图片提取",
-        "user_note": "用户备注",
-    }
     expected: set[str] = set()
     readable_paths: set[str] = set()
     try:
         for ref, item in state["items"].items():
-            valid_id(ref)
+            if valid_id(ref) != item.get("id"):
+                raise ValueError
             entry_path = FileIndex.readable_path(ref)
             expected.add(entry_path)
             readable_paths.add(entry_path)
             for kind, artifact in item["artifacts"].items():
-                version = valid_id(artifact["version"])
-                path = f"content-vault/80_附件/抖音/{ref}/{version}/{filenames[kind]}.md"
-                if artifact["path"] != path:
-                    raise ValueError
+                path = _artifact_path(ref, kind, artifact)
                 body = files.get(path)
                 if body is None or _sha256(body) != artifact["sha256"]:
                     raise ValueError
+                body.decode("utf-8")
                 expected.add(path)
         for identity, record in state.get("prepared_inputs", {}).items():
             valid_id(identity)
             path = f".context/输入/{identity}.json"
             body = files.get(path)
-            if (
-                record["path"] != path
-                or body is None
-                or _sha256(body) != record["sha256"]
-            ):
+            if record["path"] != path or body is None or _sha256(body) != record["sha256"]:
                 raise ValueError
             payload = json.loads(body)
+            PreparedInputs._validate(payload)
             material_ref = valid_id(payload["material_ref"])
-            if record["material_ref"] != material_ref:
+            if (
+                record["material_ref"] != material_ref
+                or material_ref not in state["items"]
+                or identity != "u_" + digest(payload)
+            ):
                 raise ValueError
             expected.add(path)
             blobs = [*payload["originals"]]
@@ -400,9 +432,7 @@ def _validate_references(
             for blob in blobs:
                 blob_path = blob["path"]
                 SafeFiles.parts(blob_path)
-                if not blob_path.startswith(
-                    f"content-vault/80_附件/抖音/{material_ref}/输入/"
-                ):
+                if blob_path != PreparedInputs._path(material_ref, blob["sha256"], blob["mime_type"]):
                     raise ValueError
                 blob_body = files.get(blob_path)
                 if (
@@ -426,9 +456,7 @@ def _validate_references(
         ):
             raise ValueError
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, ContextError):
-        raise ContextError(
-            "backup_invalid", "备份的资料引用、附件或受控路径不完整。"
-        ) from None
+        raise ContextError("backup_invalid", "备份的资料引用、附件或受控路径不完整。") from None
 
 
 def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
@@ -446,9 +474,7 @@ def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
     _validate_state(state, manifest["workspace_id"])
     generated_entries = manifest.get("generated_entry_hashes", {})
     _validate_references(state, files, generated_entries)
-    staging = Path(
-        tempfile.mkdtemp(prefix=f".{destination.name}-restore-", dir=destination.parent)
-    )
+    staging = Path(tempfile.mkdtemp(prefix=f".{destination.name}-restore-", dir=destination.parent))
     published = False
     try:
         with SafeFiles(staging) as safe:

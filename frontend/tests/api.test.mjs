@@ -132,3 +132,59 @@ test("401 removes CSRF before any subsequent request", async (t) => {
   assert.equal(sent[0].get("X-CSRF-Token"), "old-synthetic-session");
   assert.equal(sent[1].has("X-CSRF-Token"), false);
 });
+
+test("export download is authenticated same-origin POST with an exact allowlist", async(t)=>{
+  let captured;
+  installFetch(t,async(path,options)=>{captured={path,options};return new Response('PK-fixture',{headers:{'Content-Type':'application/zip'}})});
+  const api=createApi();api.setSession({csrf_token:'fixture-csrf'});
+  const blob=await api.download('/v1/management/library/export',{confirmed:true});
+  assert.equal(blob.size,10);
+  assert.equal(captured.options.method,'POST');
+  assert.equal(captured.options.credentials,'same-origin');
+  assert.equal(new Headers(captured.options.headers).get('X-CSRF-Token'),'fixture-csrf');
+  assert.throws(()=>api.download('/v1/session',{}));
+});
+
+test("download error envelopes are not saved as ZIP archives",async(t)=>{
+  installFetch(t,async()=>response(403,{ok:false,error:{message:'not allowed'}}));
+  await assert.rejects(createApi().download('/v1/management/library/export',{}));
+});
+
+test("an untrusted MIME response and an oversized ZIP are rejected",async(t)=>{
+  installFetch(t,async()=>new Response('not a download',{headers:{'Content-Type':'text/html'}}));
+  await assert.rejects(createApi().download('/v1/management/library/export',{}));
+  globalThis.fetch=async()=>new Response('PK',{headers:{'Content-Type':'application/zip','Content-Length':'66000000'}});
+  await assert.rejects(createApi().download('/v1/management/library/export',{}));
+});
+
+test("download cannot return data for a replaced session",async(t)=>{
+  let finish;
+  installFetch(t,()=>new Promise(resolve=>{finish=resolve}));
+  const api=createApi();api.setSession({csrf_token:'fixture'});
+  const pending=api.download('/v1/management/library/export',{});
+  api.setSession(null);finish(new Response('PK',{headers:{'Content-Type':'application/zip'}}));
+  await assert.rejects(pending);
+});
+
+test("rapid page requests keep at most two in flight without retrying",async(t)=>{
+  const finish=[];let calls=0;
+  installFetch(t,()=>{calls++;return new Promise(resolve=>finish.push(resolve))});
+  const api=createApi();
+  const first=api.request('/v1/session');const second=api.request('/v1/session');const third=api.request('/v1/session');
+  assert.equal(calls,2);
+  finish[0](response(200,{ok:true,data:{}}));await first;
+  await Promise.resolve();assert.equal(calls,3);
+  finish[1](response(200,{ok:true,data:{}}));finish[2](response(200,{ok:true,data:{}}));
+  await Promise.all([second,third]);assert.equal(calls,3);
+});
+
+test("queued requests never send after the session changes",async(t)=>{
+  const finish=[];let calls=0;
+  installFetch(t,()=>{calls++;return new Promise(resolve=>finish.push(resolve))});
+  const api=createApi();api.setSession({csrf_token:'old-fixture'});
+  const first=api.request('/v1/session');const second=api.request('/v1/session');const third=api.request('/v1/management/library/overview',{});
+  const rejected=Promise.all([first,second,third].map(value=>assert.rejects(value)));
+  api.setSession(null);
+  finish[0](response(200,{ok:true,data:{}}));finish[1](response(200,{ok:true,data:{}}));
+  await rejected;assert.equal(calls,2);
+});
