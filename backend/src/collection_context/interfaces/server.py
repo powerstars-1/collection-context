@@ -7,9 +7,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError
-from collection_context.application.model_setup import separate_credentials
 from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
 from collection_context.infrastructure.system_secrets import SystemSecrets
 from collection_context.interfaces.access import AccessRegistry
@@ -71,6 +69,8 @@ def main(argv: list[str] | None = None) -> int:
         except ImportError:
             raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
         if args.allow_model_config:
+            from collection_context.application.model_setup import separate_credentials
+
             separate_credentials(args.workspace, args.credential_dir)
             backend = SystemSecrets if args.credential_backend == "system" else FileSecrets
             model_secrets = (
@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
                 else backend.initialize(args.credential_dir)
             )
         if args.allow_source_connect:
+            from collection_context.application.connection_runner import ConnectionRunner
+
             connection_runner = ConnectionRunner(
                 args.workspace,
                 args.browser_dir,

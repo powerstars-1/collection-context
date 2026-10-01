@@ -10,21 +10,19 @@ from contextlib import asynccontextmanager
 from http.cookies import CookieError, SimpleCookie
 from importlib.resources import files
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from collection_context.application.agent_addition import AgentAdditionGateway
-from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError, canonical_bytes, envelope
 from collection_context.application.gateway import ReadGateway, http_status
-from collection_context.application.library_management import LibraryManagement
-from collection_context.application.management import ManagementService
-from collection_context.application.media_evidence import MediaEvidence
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.security import AccessPolicy
 from collection_context.library.store import LibraryStore
-from collection_context.workflows.addition import AdditionWorkflow
+
+if TYPE_CHECKING:
+    from collection_context.application.connection_runner import ConnectionRunner
 
 COOKIE_NAME = "context_session"
 MAX_BODY = 65_536
@@ -255,15 +253,40 @@ def create_app(
         raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
     store = LibraryStore(workspace)
     gateway = ReadGateway(ContextService(store))
-    media_evidence = MediaEvidence(store)
-    addition = AdditionWorkflow(store, agent_authority=AccessRegistry(store).authorize_add)
     try:
-        management = ManagementService(
-            store, model_secrets=model_secrets, connection_runner=connection_runner
-        )
+        if model_secrets is not None:
+            from collection_context.application.model_setup import separate_credentials
+
+            separate_credentials(workspace, model_secrets.files.root)
     except BaseException:
         store.close()
         raise
+
+    # These services are stateless wrappers around this same store. Load them only
+    # inside an authenticated call's worker, not while starting the read API or
+    # serving the shell. Each retains the original permission/budget boundaries.
+    def addition_dispatch(principal, action, value):
+        from collection_context.workflows.addition import AdditionWorkflow
+
+        workflow = AdditionWorkflow(store, agent_authority=AccessRegistry(store).authorize_add)
+        return AgentAdditionGateway(workflow, principal).dispatch(action, value)
+
+    def evidence_dispatch(action, *args):
+        from collection_context.application.media_evidence import MediaEvidence
+
+        return getattr(MediaEvidence(store), action)(*args)
+
+    def management_dispatch(action, value):
+        from collection_context.application.management import ManagementService
+
+        return ManagementService(
+            store, model_secrets=model_secrets, connection_runner=connection_runner
+        ).dispatch(action, value)
+
+    def library_controller(authorize):
+        from collection_context.application.library_management import LibraryManagement
+
+        return LibraryManagement(store, authorize=authorize)
 
     @asynccontextmanager
     async def lifespan(_):
@@ -337,8 +360,9 @@ def create_app(
     app.add_api_route("/v1/collections/search", search, methods=["POST"])
 
     async def add_collection(request):
-        agent = AgentAdditionGateway(addition, request.state.credential.principal)
-        result = await run_in_threadpool(agent.dispatch, "add_collection", await body(request))
+        result = await run_in_threadpool(
+            addition_dispatch, request.state.credential.principal, "add_collection", await body(request)
+        )
         return result_response(result, 202 if result["ok"] and result["data"]["state"] == "queued" else None)
 
     add_collection.__annotations__["request"] = Request
@@ -347,8 +371,11 @@ def create_app(
     async def get_job(job_id: str, request):
         if request.query_params:
             raise ContextError("invalid_argument", "任务状态不接收查询参数。")
-        agent = AgentAdditionGateway(addition, request.state.credential.principal)
-        return result_response(await run_in_threadpool(agent.dispatch, "get_job", {"job_id": job_id}))
+        return result_response(
+            await run_in_threadpool(
+                addition_dispatch, request.state.credential.principal, "get_job", {"job_id": job_id}
+            )
+        )
 
     get_job.__annotations__["request"] = Request
     app.add_api_route("/v1/jobs/{job_id}", get_job, methods=["GET"])
@@ -389,7 +416,7 @@ def create_app(
     async def frame_list(material_ref: str, request):
         if request.query_params:
             raise ContextError("invalid_argument", "画面读取不接收任意路径或查询参数。")
-        data = await run_in_threadpool(media_evidence.listing, material_ref)
+        data = await run_in_threadpool(evidence_dispatch, "listing", material_ref)
         return result_response(envelope(data))
 
     frame_list.__annotations__["request"] = Request
@@ -398,7 +425,7 @@ def create_app(
     async def frame_image(material_ref: str, input_id: str, frame_id: str, request):
         if request.query_params:
             raise ContextError("invalid_argument", "画面读取不接收任意路径或查询参数。")
-        image, mime = await run_in_threadpool(media_evidence.image, material_ref, input_id, frame_id)
+        image, mime = await run_in_threadpool(evidence_dispatch, "image", material_ref, input_id, frame_id)
         return Response(image, media_type=mime)
 
     frame_image.__annotations__["request"] = Request
@@ -420,7 +447,7 @@ def create_app(
             ):
                 raise ContextError("permission_denied", "资料管理需要有效的主人页面会话。")
 
-        controller = LibraryManagement(store, authorize=authorize_owner)
+        controller = await run_in_threadpool(library_controller, authorize_owner)
         allowed = {
             "overview": set(),
             "excluded": {"offset", "limit", "version"},
@@ -476,7 +503,7 @@ def create_app(
     app.add_api_route("/v1/management/library/{action}", library_manage, methods=["POST"])
 
     async def manage(action: str, request):
-        return result_response(await run_in_threadpool(management.dispatch, action, await body(request)))
+        return result_response(await run_in_threadpool(management_dispatch, action, await body(request)))
 
     manage.__annotations__["request"] = Request
     app.add_api_route("/v1/management/{action}", manage, methods=["POST"])
