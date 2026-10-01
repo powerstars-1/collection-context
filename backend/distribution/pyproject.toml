@@ -9,6 +9,7 @@ dependencies = []
 collection-context = "collection_context.cli:main"
 collection-context-mcp = "collection_context.interfaces.mcp:main"
 collection-context-web = "collection_context.interfaces.server:main"
+collection-context-launch = "collection_context.launcher:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -24,5 +25,6 @@ include = ["collection_context*"]
 [project.optional-dependencies]
 mcp = ["mcp==2.2.0"]
 web = ["fastapi==0.142.2", "uvicorn==0.54.0"]
+launcher = ["fastapi==0.142.2", "uvicorn==0.54.0"]
 browser = ["playwright==1.63.0"]
 ocr = ["rapidocr==3.9.2", "onnxruntime==1.30.0"]
