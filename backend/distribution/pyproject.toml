@@ -1,0 +1,28 @@
+[project]
+name = "collection-context"
+version = "0.2.0.dev0"
+description = "Original local-first collection context backend; development candidate."
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+collection-context = "collection_context.cli:main"
+collection-context-mcp = "collection_context.interfaces.mcp:main"
+collection-context-web = "collection_context.interfaces.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["collection_context*"]
+
+[tool.setuptools.package-data]
+"collection_context.interfaces" = ["assets/*.html", "assets/*.css", "assets/*.js"]
+
+[project.optional-dependencies]
+mcp = ["mcp==2.2.0"]
+web = ["fastapi==0.142.2", "uvicorn==0.54.0"]
+browser = ["playwright==1.63.0"]
+ocr = ["rapidocr==3.9.2", "onnxruntime==1.30.0"]
