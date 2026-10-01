@@ -65,6 +65,7 @@ class DiagnosticResult:
     parameters: DiagnosticParameters
     workspace: Path | None = field(default=None, repr=False)
     report: dict[str, Any] | None = field(default=None, repr=False)
+    runtime_options: dict[str, Any] | None = field(default=None, repr=False)
 
 
 class DesktopDiagnostics:
@@ -77,9 +78,15 @@ class DesktopDiagnostics:
     Service workers remain non-daemon and have their separate stop lifecycle.
     """
 
-    def __init__(self, *, checker: Callable[..., dict[str, Any]] = startup_report) -> None:
+    def __init__(
+        self,
+        *,
+        checker: Callable[..., dict[str, Any]] = startup_report,
+        options_checker: Callable[[], dict[str, Any]] | None = None,
+    ) -> None:
         self.events: queue.Queue[DiagnosticResult] = queue.Queue()
         self._checker = checker
+        self._options_checker = options_checker
         self._lock = threading.Lock()
         self._generation = 0
         self._current: DiagnosticParameters | None = None
@@ -129,6 +136,7 @@ class DesktopDiagnostics:
             generation, parameters = request
             workspace = None
             report = None
+            options = None
             try:
                 # Even home expansion and dependency imports belong off Tk's thread.
                 workspace = Path(parameters.workspace).expanduser()
@@ -136,9 +144,144 @@ class DesktopDiagnostics:
             except BaseException:
                 # Never retain or render filesystem/model/OS exception details.
                 pass
+            try:
+                checker = self._options_checker
+                if checker is None:
+                    from collection_context.application.runtime_setup import runtime_options
+
+                    checker = runtime_options
+                options = checker()
+            except BaseException:
+                # Catalog inspection is independent from management-page readiness.
+                pass
             with self._lock:
                 if generation == self._generation and parameters == self._current:
-                    self.events.put(DiagnosticResult(generation, parameters, workspace, report))
+                    self.events.put(DiagnosticResult(generation, parameters, workspace, report, options))
+
+
+_INSTALL_ERRORS = {
+    "runtime_install_confirmation": "安装未确认，没有下载组件。",
+    "runtime_install_catalog": "此安装项不属于产品固定清单，没有下载。",
+    "runtime_install_unavailable": "当前主机或运行库不满足此安装项，没有下载。",
+    "runtime_install_cancelled": "安装线程已结束取消处理；未继续发布安装收据。",
+    "runtime_install_outcome_unknown": "安装结果未能确认；请检查组件状态，未自动重试。",
+    "runtime_install_busy": "组件安装正在被其他操作使用，没有自动重试。",
+    "runtime_install_integrity": "组件校验未通过，没有将其声明为可用。",
+    "runtime_install_unsafe": "安装位置不符合产品隔离要求，没有修改目录权限。",
+    "runtime_download_integrity": "下载内容与固定清单不符，没有安装。",
+    "runtime_download_failed": "组件下载未完成，没有自动重试。",
+}
+
+
+class DesktopInstallation:
+    """Explicit fixed-catalog installation; no GUI work or arbitrary paths/URLs.
+
+    Stop is cooperative. An in-progress network or filesystem operation may
+    still be waiting; the non-daemon thread must really finish before exit.
+    A shared operation lock excludes concurrent desktop service startup.
+    """
+
+    def __init__(
+        self,
+        *,
+        installer: Callable[..., dict[str, Any]] | None = None,
+        options_checker: Callable[[], dict[str, Any]] | None = None,
+        operation_lock: Any = None,
+    ) -> None:
+        self.events: queue.Queue[DesktopStatus] = queue.Queue()
+        self._installer = installer
+        self._options_checker = options_checker
+        self._operation_lock = operation_lock if operation_lock is not None else threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._state_lock = threading.Lock()
+        self.stop_event = threading.Event()
+        self.state = "idle"
+
+    @property
+    def active(self) -> bool:
+        return self._worker is not None and self._worker.is_alive()
+
+    def _status(self, state: str, message: str, code: str | None = None) -> None:
+        with self._state_lock:
+            self.state = state
+            self.events.put(DesktopStatus(state, message, code))
+
+    def start(self, workspace: Path, *, artifact_id: str, installation_confirmed: bool = False) -> None:
+        if installation_confirmed is not True:
+            raise ContextError(
+                "runtime_install_confirmation", _INSTALL_ERRORS["runtime_install_confirmation"]
+            )
+        if not isinstance(artifact_id, str) or not artifact_id or self.active:
+            raise ContextError("runtime_install_busy", "请先等待当前安装完成，再重新选择固定安装项。")
+        if not self._operation_lock.acquire(blocking=False):
+            raise ContextError("desktop_operation_busy", "请先停止服务或等待组件安装结束。")
+        self.stop_event = threading.Event()
+        self._status("installing", "正在安装已确认的单项组件；没有启动浏览器、同步或模型任务。")
+        try:
+            self._worker = threading.Thread(
+                target=self._run,
+                args=(workspace, artifact_id),
+                name="collection-context-runtime-install",
+                daemon=False,
+            )
+            self._worker.start()
+        except BaseException:
+            self._operation_lock.release()
+            self._status("failed", "安装线程未能启动；未显示内部异常。", "runtime_install_failed")
+
+    def request_stop(self) -> None:
+        self.stop_event.set()
+        with self._state_lock:
+            if self.active and self.state == "installing":
+                self.state = "stopping"
+                self.events.put(
+                    DesktopStatus("stopping", "已请求停止安装；底层下载可能仍在等待，须等真实安装线程结束。")
+                )
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._worker is not None:
+            self._worker.join(timeout)
+
+    def _run(self, workspace: Path, artifact_id: str) -> None:
+        try:
+            from collection_context.application.runtime_setup import install_runtime, runtime_options
+
+            options = (self._options_checker or runtime_options)()
+            choice = next((item for item in options["artifacts"] if item["id"] == artifact_id), None)
+            if choice is None:
+                raise ContextError("runtime_install_catalog", "未选择固定清单项。")
+            if choice["state"] != "available":
+                raise ContextError("runtime_install_unavailable", "此主机不满足固定安装项。")
+            if self.stop_event.is_set():
+                raise ContextError("runtime_install_cancelled", "已请求停止。")
+            # Resolve paths off Tk; callers cannot select an installation directory.
+            result = (self._installer or install_runtime)(
+                default_workspace().parent / "runtime",
+                library_dir=workspace.expanduser(),
+                artifact_id=artifact_id,
+                installation_confirmed=True,
+                stop=self.stop_event,
+            )
+            if result.get("state") != "installed" or result.get("static_verified") is not True:
+                self._status(
+                    "failed", "安装结果未完成静态校验；未将组件声明为可用。", "runtime_install_failed"
+                )
+            else:
+                self._status(
+                    "installed",
+                    "组件已安装并完成静态校验；浏览器启动、登录、同步和识别功能均未验证，未自动执行。",
+                )
+        except ContextError as error:
+            code = error.code if error.code in _INSTALL_ERRORS else "runtime_install_failed"
+            self._status(
+                "cancelled" if code == "runtime_install_cancelled" else "failed",
+                _INSTALL_ERRORS.get(code, "组件安装未完成；未显示内部异常，没有自动重试。"),
+                code,
+            )
+        except BaseException:
+            self._status("failed", "组件安装未完成；未显示内部异常，没有自动重试。", "runtime_install_failed")
+        finally:
+            self._operation_lock.release()
 
 
 @dataclass(eq=False)
@@ -175,11 +318,14 @@ class _DiscardOutput(io.TextIOBase):
 class DesktopController:
     """GUI-independent lifecycle. Construction and selection never start work."""
 
-    def __init__(self, *, launch_service: Callable[..., int] | None = None) -> None:
+    def __init__(
+        self, *, launch_service: Callable[..., int] | None = None, operation_lock: Any = None
+    ) -> None:
         self.events: queue.Queue[DesktopStatus | OwnerPrompt] = queue.Queue()
         self._launch_service = launch_service
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._operation_lock = operation_lock if operation_lock is not None else threading.Lock()
         self._pending: set[OwnerPrompt] = set()
         self.stop_event = threading.Event()
         self.state = "idle"
@@ -211,15 +357,22 @@ class DesktopController:
             or any(type(flag) is not bool for flag in desktop_permissions)
         ):
             raise ContextError("launcher_capabilities_invalid", "请选择明确的启动能力。")
+        if not self._operation_lock.acquire(blocking=False):
+            raise ContextError("desktop_operation_busy", "请先等待组件安装结束或停止当前服务。")
         self.stop_event = threading.Event()
         self._status("starting", "正在按已确认的能力启动本机服务；不会自动安装依赖。")
-        self._worker = threading.Thread(
-            target=self._run,
-            args=(workspace, port, initialize_empty, desktop_permissions),
-            name="collection-context-desktop-service",
-            daemon=False,
-        )
-        self._worker.start()
+        try:
+            self._worker = threading.Thread(
+                target=self._run,
+                args=(workspace, port, initialize_empty, desktop_permissions),
+                name="collection-context-desktop-service",
+                daemon=False,
+            )
+            self._worker.start()
+        except BaseException:
+            self._operation_lock.release()
+            self._status("failed", "本机服务线程未能启动。", "desktop_display_required")
+            raise ContextError("desktop_display_required", "本机服务线程未能启动。") from None
 
     def _ready(self) -> None:
         with self._lock:
@@ -325,6 +478,7 @@ class DesktopController:
             with self._lock:
                 for prompt in self._pending:
                     prompt.resolve(False)
+            self._operation_lock.release()
 
 
 def capability_description(report: dict[str, Any]) -> str:
@@ -353,16 +507,61 @@ def capability_description(report: dict[str, Any]) -> str:
     return "\n".join(descriptions)
 
 
+def runtime_catalog_description(options: dict[str, Any]) -> str:
+    """Render only compiled catalog fields; installation does not prove functionality."""
+    states = {
+        "available": "本机满足安装条件（功能未验证）",
+        "host_not_available": "本机系统/架构不支持",
+        "os_version_not_available": "本机系统版本不满足",
+        "os_version_not_verified": "本机系统版本尚未确认",
+        "sdk_version_mismatch": "浏览器运行库版本不匹配",
+        "sdk_missing": "缺少浏览器运行库",
+    }
+    missing = {
+        "desktop_browser": "可见登录浏览器",
+        "ffmpeg_pair": "视频/音频处理工具",
+        "ocr_weights": "OCR 识别权重",
+        "Windows": "Windows 固定安装包",
+        "Linux": "Linux 固定安装包",
+    }
+    lines = ["安装只下载已校验清单中的单项，不授予同步或模型权限。\n"]
+    for item in options.get("artifacts", ()):
+        size = item.get("download_bytes")
+        volume = f"{size:,} 字节" if type(size) is int else "尚未提供"
+        lines.extend(
+            (
+                str(item["name"]),
+                "主机状态：" + states.get(item.get("state"), "状态尚未确认，不可选择安装"),
+                "目标："
+                + str(item.get("host_system", "未提供"))
+                + " / "
+                + str(item.get("host_arch", "未提供")),
+                "下载体积：" + volume,
+                "来源：" + str(item.get("source_url", "未提供")),
+                "许可：" + str(item.get("license_notice", "许可尚未提供")),
+                "静态安装成功仍不等于登录、同步或识别可用。\n",
+            )
+        )
+    lines.append(
+        "缺项：" + "、".join(missing.get(name, str(name)) for name in options.get("not_available", ()))
+    )
+    return "\n".join(lines)
+
+
 class _DesktopWindow:
     def __init__(self, workspace: Path, port: int) -> None:
         import tkinter as tk
         from tkinter import filedialog, messagebox, ttk
 
         self.root = tk.Tk()
-        self.controller = DesktopController()
+        operation_lock = threading.Lock()
+        self.controller = DesktopController(operation_lock=operation_lock)
+        self.installation = DesktopInstallation(operation_lock=operation_lock)
         self.diagnostics = DesktopDiagnostics()
         self._diagnostic_cache: DiagnosticResult | None = None
         self._start_intent: int | None = None
+        self._install_generation = 0
+        self.install_window: Any = None
         self.close_requested = False
         self.destroyed = False
         self.token_window: _TokenWindow | None = None
@@ -422,6 +621,8 @@ class _DesktopWindow:
             self.start_button.pack(side="left")
             self.stop_button = ttk.Button(actions, text="停止", command=self._stop, state="disabled")
             self.stop_button.pack(side="left", padx=10)
+            self.install_button = ttk.Button(actions, text="安装运行组件", command=self._open_installation)
+            self.install_button.pack(side="left")
             ttk.Button(actions, text="退出", command=self._close).pack(side="right")
             self.root.protocol("WM_DELETE_WINDOW", self._close)
             for observed_variable in (self.workspace, self.port, self.initialize, *self.permission_variables):
@@ -447,7 +648,7 @@ class _DesktopWindow:
             pass
 
     def _choose(self) -> None:
-        if self.controller.active or self.close_requested:
+        if self.controller.active or self._installation_active() or self.close_requested:
             return
         # The directory dialog runs a nested GUI loop. Invalidate a prior Start
         # intent before opening it, not only after the user chooses a new path.
@@ -484,6 +685,7 @@ class _DesktopWindow:
         self.diagnostics.cancel()
         self._diagnostic_cache = None
         self._start_intent = None
+        self._install_generation = getattr(self, "_install_generation", 0) + 1
         self.dependencies.set("参数已更新，需重新检测；没有安装或下载任何组件。")
         self.status.set("尚未启动；请重新检测当前资料库和端口。")
         self._controls(self.controller.active)
@@ -512,7 +714,7 @@ class _DesktopWindow:
             return None
 
     def _start(self) -> None:
-        if self.controller.active or self.close_requested:
+        if self.controller.active or self._installation_active() or self.close_requested:
             return
         report = self._refresh_dependencies()
         if report is None:
@@ -566,6 +768,7 @@ class _DesktopWindow:
         if (
             self.close_requested
             or self.controller.active
+            or self._installation_active()
             or (diagnostics is not None and diagnostics.generation != generation)
             or parameters != self._parameters()
             or initialize_empty != (self.initialize.get() is True)
@@ -581,7 +784,119 @@ class _DesktopWindow:
         self.controller.start(workspace, port=port, initialize_empty=initialize_empty, **options)
         self._controls(True)
 
+    def _installation_active(self) -> bool:
+        installation = getattr(self, "installation", None)
+        return installation is not None and installation.active
+
+    def _open_installation(self) -> None:
+        """Main-thread fixed-catalog picker; never accepts an installation URL/path."""
+        if self.close_requested or self.controller.active or self._installation_active():
+            return
+        self._start_intent = None
+        self._refresh_dependencies()
+        cached = self._diagnostic_cache
+        if cached is None or cached.runtime_options is None:
+            self.status.set("组件清单仍在只读检测；检测结束后请重新点击安装运行组件。没有下载。")
+            return
+        if self.install_window is not None:
+            self.install_window.lift()
+            return
+        import tkinter as tk
+        from tkinter import ttk
+
+        choices = tuple(cached.runtime_options.get("artifacts", ()))
+        generation = self._install_generation
+        parameters = cached.parameters
+        dialog = tk.Toplevel(self.root)
+        self.install_window = dialog
+        dialog.title("安装运行组件 · 单项确认")
+        dialog.geometry("730x580")
+        frame = ttk.Frame(dialog, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="固定产品清单 · 不自动下载", font=("TkDefaultFont", 16)).pack(anchor="w")
+        text = tk.Text(frame, wrap="word", height=18, font=("TkDefaultFont", 11))
+        text.pack(fill="both", expand=True, pady=12)
+        text.insert("1.0", runtime_catalog_description(cached.runtime_options))
+        text.configure(state="disabled")
+        choice = ttk.Combobox(frame, state="readonly", values=[item["name"] for item in choices])
+        choice.pack(fill="x", pady=8)
+        install_button = ttk.Button(frame, text="确认所选单项安装", state="disabled")
+        install_button.pack(side="left")
+        ttk.Button(frame, text="关闭清单（不安装）", command=self._dismiss_installation).pack(side="right")
+
+        def selected(_event: Any = None) -> None:
+            index = choice.current()
+            install_button.configure(
+                state="normal" if index >= 0 and choices[index]["state"] == "available" else "disabled"
+            )
+
+        def install() -> None:
+            index = choice.current()
+            if index < 0 or choices[index]["state"] != "available":
+                return
+            self._confirm_installation(choices[index], parameters, generation)
+
+        choice.bind("<<ComboboxSelected>>", selected)
+        install_button.configure(command=install)
+        dialog.protocol("WM_DELETE_WINDOW", self._dismiss_installation)
+        self._controls(False)
+
+    def _dismiss_installation(self) -> None:
+        dialog = getattr(self, "install_window", None)
+        self.install_window = None
+        self._install_generation = getattr(self, "_install_generation", 0) + 1
+        if dialog is not None:
+            dialog.destroy()
+
+    def _confirm_installation(
+        self, choice: dict[str, Any], parameters: DiagnosticParameters, generation: int
+    ) -> None:
+        if (
+            self.close_requested
+            or self.controller.active
+            or self._installation_active()
+            or generation != self._install_generation
+            or parameters != self._diagnostic_parameters()
+            or choice.get("state") != "available"
+        ):
+            self.status.set("资料库或当前操作已变化，请重新打开组件清单；没有下载。")
+            return
+        if not self.messagebox.askyesno(
+            "确认单项组件安装",
+            f"仅安装：{choice['name']}\n"
+            f"下载体积：{choice['download_bytes']:,} 字节\n来源：{choice['source_url']}\n"
+            f"许可：{choice['license_notice']}\n"
+            "只写入产品固定运行组件目录。安装不会启用任何权限，不启动浏览器、同步或模型。\n"
+            "取消或退出须等待底层下载/安装线程真实结束。确认继续？",
+            parent=self.root,
+        ):
+            self.status.set("已取消单项安装，没有下载。")
+            return
+        # A confirmation dialog runs a nested Tk loop: selections/Stop/Close can change.
+        if (
+            self.close_requested
+            or self.controller.active
+            or self._installation_active()
+            or generation != self._install_generation
+            or parameters != self._diagnostic_parameters()
+        ):
+            self.status.set("旧安装意图已失效，没有下载；请重新选择。")
+            return
+        self._start_intent = None
+        self.diagnostics.cancel()
+        self._diagnostic_cache = None
+        self._dismiss_installation()
+        try:
+            self.installation.start(
+                Path(parameters.workspace), artifact_id=choice["id"], installation_confirmed=True
+            )
+        except ContextError:
+            self.status.set("安装未能开始，请等待当前服务或安装操作结束；没有自动重试。")
+        self._controls(self.controller.active)
+
     def _controls(self, active: bool) -> None:
+        installing = self._installation_active()
+        busy = active or installing
         for widget in (
             self.path_entry,
             self.choose_button,
@@ -589,17 +904,21 @@ class _DesktopWindow:
             self.port_entry,
             *getattr(self, "permission_checks", ()),
         ):
-            widget.configure(state="disabled" if active or self.close_requested else "normal")
+            widget.configure(state="disabled" if busy or self.close_requested else "normal")
         self.start_button.configure(
-            state="disabled" if active or self.close_requested or self._start_intent is not None else "normal"
+            state="disabled" if busy or self.close_requested or self._start_intent is not None else "normal"
         )
         self.stop_button.configure(
             state="normal"
-            if active or self.diagnostics.active or self._start_intent is not None
+            if busy or self.diagnostics.active or self._start_intent is not None
             else "disabled"
         )
+        install_button = getattr(self, "install_button", None)
+        if install_button is not None:
+            install_button.configure(state="disabled" if busy or self.close_requested else "normal")
 
     def _stop(self) -> None:
+        self._install_generation = getattr(self, "_install_generation", 0) + 1
         diagnostics = getattr(self, "diagnostics", None)
         if diagnostics is not None:
             waiting = diagnostics.active
@@ -609,15 +928,19 @@ class _DesktopWindow:
             if waiting and not self.controller.active:
                 self.status.set("已取消使用检测结果，未启动服务；系统目录检查可能仍在等待返回。")
         self.controller.request_stop()
+        installation = getattr(self, "installation", None)
+        if installation is not None:
+            installation.request_stop()
         if self.token_window is not None:
             self.token_window.clear_and_close()
 
     def _close(self) -> None:
         self.close_requested = True
+        self._dismiss_installation()
         self._stop()
         self._controls(self.controller.active)
-        if self.controller.active:
-            self.status.set("正在停止后台服务；退出前会保持窗口可见。")
+        if self.controller.active or self._installation_active():
+            self.status.set("正在停止后台服务或等待安装线程结束；退出前会保持窗口可见。")
 
     def _present(self, token: str) -> bool:
         try:
@@ -643,8 +966,16 @@ class _DesktopWindow:
                     return
             else:
                 self.status.set(event.message)
+        installation = getattr(self, "installation", None)
+        if installation is not None:
+            while True:
+                try:
+                    event = installation.events.get_nowait()
+                except queue.Empty:
+                    break
+                self.status.set(event.message)
         self._controls(self.controller.active)
-        if self.close_requested and not self.controller.active:
+        if self.close_requested and not self.controller.active and not self._installation_active():
             self.destroyed = True
             self.root.destroy()
 
@@ -661,6 +992,7 @@ class _DesktopWindow:
             if (
                 self.close_requested
                 or self.controller.active
+                or self._installation_active()
                 or event.generation != self.diagnostics.generation
                 or event.parameters != parameters
             ):
@@ -690,7 +1022,7 @@ class _DesktopWindow:
     def recover_stopping(self) -> None:
         """Keep an abnormal GUI exit visible until the real service finishes."""
         self.close_requested = True
-        self.status.set("停止尚未完成；请等待服务退出。当前进程没有完成退出。")
+        self.status.set("停止尚未完成；请等待服务或安装线程退出。当前进程没有完成退出。")
         self.root.deiconify()
         self.root.after(75, self._poll)
         self.root.mainloop()
@@ -721,9 +1053,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
             window.controller.request_stop()
             window.controller.join(timeout=5)
-            if window.controller.active:
+            installation = getattr(window, "installation", None)
+            if installation is not None:
+                installation.request_stop()
+                installation.join(timeout=5)
+            if window.controller.active or (installation is not None and installation.active):
                 print(
-                    "desktop_stop_pending: 后台服务尚未完成停止，进程并未退出。",
+                    "desktop_stop_pending: 后台服务或安装线程尚未完成停止，进程并未退出。",
                     file=sys.stderr,
                 )
                 try:
@@ -731,8 +1067,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except BaseException:
                     # Destroyed/broken display cannot be repaired by pretending
                     # the live non-daemon service thread is already terminated.
-                    print("desktop_stop_pending: 窗口未能恢复，服务仍须完成停止。", file=sys.stderr)
-                if window.controller.active:
+                    print("desktop_stop_pending: 窗口未能恢复，服务或安装线程仍须完成停止。", file=sys.stderr)
+                if window.controller.active or (installation is not None and installation.active):
                     result = 3
     return result
 
