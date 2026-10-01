@@ -22,6 +22,8 @@ from collection_context.diagnostics import default_workspace, startup_report
 from collection_context.native_bootstrap import _TokenWindow, present_owner_token
 
 _SAFE_ERRORS = {
+    "launcher_capabilities_invalid": "启动能力配置不完整；执行必须先启用对应配置或登录能力。",
+    "launcher_directory_unsafe": "产品配置目录不符合隔离要求；没有修改原目录权限。",
     "workspace_initialization_required": "请明确同意建立一个空资料库。",
     "workspace_not_usable": "资料库无法使用；原有目录未被迁移。",
     "workspace_not_initialized": "此目录不是可用资料库。",
@@ -46,6 +48,7 @@ class DiagnosticParameters:
     workspace: str
     port: int
     initialize_empty: bool
+    permissions: tuple[bool, bool, bool, bool] = (False, False, False, False)
 
 
 @dataclass(frozen=True)
@@ -182,16 +185,29 @@ class DesktopController:
             self.state = state
             self.events.put(DesktopStatus(state, message, code))
 
-    def start(self, workspace: Path, *, port: int, initialize_empty: bool) -> None:
+    def start(
+        self,
+        workspace: Path,
+        *,
+        port: int,
+        initialize_empty: bool,
+        desktop_permissions: tuple[bool, bool, bool, bool] | None = None,
+    ) -> None:
         if self.active:
             raise ContextError("desktop_already_running", "请先停止当前服务。")
         if type(port) is not int or not 1 <= port <= 65_535:
             raise ContextError("invalid_port", "请填写 1 到 65535 的端口。")
+        if desktop_permissions is not None and (
+            type(desktop_permissions) is not tuple
+            or len(desktop_permissions) != 4
+            or any(type(flag) is not bool for flag in desktop_permissions)
+        ):
+            raise ContextError("launcher_capabilities_invalid", "请选择明确的启动能力。")
         self.stop_event = threading.Event()
-        self._status("starting", "正在启动本机服务；不会同步来源、安装依赖或调用模型。")
+        self._status("starting", "正在按已确认的能力启动本机服务；不会自动安装依赖。")
         self._worker = threading.Thread(
             target=self._run,
-            args=(workspace, port, initialize_empty),
+            args=(workspace, port, initialize_empty, desktop_permissions),
             name="collection-context-desktop-service",
             daemon=False,
         )
@@ -250,13 +266,34 @@ class DesktopController:
         if self._worker is not None:
             self._worker.join(timeout)
 
-    def _run(self, workspace: Path, port: int, initialize_empty: bool) -> None:
+    def _run(
+        self,
+        workspace: Path,
+        port: int,
+        initialize_empty: bool,
+        desktop_permissions: tuple[bool, bool, bool, bool] | None,
+    ) -> None:
         try:
             service = self._launch_service
             if service is None:
                 from collection_context.launcher import launch
 
                 service = launch
+            options: dict[str, Any] = {}
+            if desktop_permissions is not None:
+                from collection_context.application.launcher_capabilities import default_desktop_capabilities
+
+                # Path checks may wait for OS permission: never perform these on Tk.
+                options["capabilities"] = default_desktop_capabilities(
+                    workspace.absolute(),
+                    allow_model_config=desktop_permissions[0],
+                    allow_source_connect=desktop_permissions[1],
+                    allow_model_calls=desktop_permissions[2],
+                    allow_source_sync=desktop_permissions[3],
+                )
+            if self.stop_event.is_set():
+                self._status("stopped", "启动已取消；未继续建立服务。")
+                return
             result = service(
                 workspace,
                 port=port,
@@ -265,6 +302,7 @@ class DesktopController:
                 output=cast(TextIO, _DiscardOutput(self._ready)),
                 owner_presenter=self._present_from_worker,
                 stop_event=self.stop_event,
+                **options,
             )
             if result == 0:
                 self._status("stopped", "后台服务已停止；可以重新启动或退出。")
@@ -325,13 +363,13 @@ class _DesktopWindow:
         try:
             self.root.report_callback_exception = self._callback_failed
             self.root.title("收藏上下文 · 本机启动")
-            self.root.geometry("760x560")
+            self.root.geometry("760x720")
             frame = ttk.Frame(self.root, padding=24)
             frame.pack(fill="both", expand=True)
             ttk.Label(frame, text="选择资料库，明确启动", font=("TkDefaultFont", 18)).pack(anchor="w")
             ttk.Label(
                 frame,
-                text="只启动本机管理页。不自动同步、不调用模型、不安装组件。",
+                text="默认只打开管理页。以下能力独立选择；不会自动安装组件。",
             ).pack(anchor="w", pady=10)
             self.workspace = tk.StringVar(master=self.root, value=str(workspace))
             self.port = tk.StringVar(master=self.root, value=str(port))
@@ -351,6 +389,21 @@ class _DesktopWindow:
             ttk.Label(port_row, text="本机端口：").pack(side="left")
             self.port_entry = ttk.Entry(port_row, textvariable=self.port, width=8)
             self.port_entry.pack(side="left")
+            self.permission_variables = tuple(tk.BooleanVar(master=self.root, value=False) for _ in range(4))
+            self.permission_checks = []
+            for label, variable in zip(
+                (
+                    "允许配置模型（开发候选：密钥保存在独立私有文件，尚未加密）",
+                    "允许在独立浏览器登录抖音（不等于允许同步）",
+                    "执行已确认的模型任务（需允许配置模型，可能计费）",
+                    "执行已确认的来源任务（需允许登录，可能下载媒体）",
+                ),
+                self.permission_variables,
+                strict=True,
+            ):
+                checkbox = ttk.Checkbutton(frame, text=label, variable=variable)
+                checkbox.pack(anchor="w", pady=3)
+                self.permission_checks.append(checkbox)
             self.dependencies = tk.StringVar(master=self.root)
             ttk.Label(frame, textvariable=self.dependencies, justify="left").pack(anchor="w", pady=16)
             self.status = tk.StringVar(master=self.root, value="尚未启动。选择目录不会写入资料。")
@@ -363,8 +416,8 @@ class _DesktopWindow:
             self.stop_button.pack(side="left", padx=10)
             ttk.Button(actions, text="退出", command=self._close).pack(side="right")
             self.root.protocol("WM_DELETE_WINDOW", self._close)
-            for variable in (self.workspace, self.port, self.initialize):
-                variable.trace_add("write", self._parameters_changed)
+            for observed_variable in (self.workspace, self.port, self.initialize, *self.permission_variables):
+                observed_variable.trace_add("write", self._parameters_changed)
             self._refresh_dependencies()
             self.root.after(75, self._poll)
         except BaseException:
@@ -406,7 +459,18 @@ class _DesktopWindow:
 
     def _diagnostic_parameters(self) -> DiagnosticParameters:
         workspace, port = self._parameters()
-        return DiagnosticParameters(str(workspace), port, self.initialize.get() is True)
+        return DiagnosticParameters(str(workspace), port, self.initialize.get() is True, self._permissions())
+
+    def _permissions(self) -> tuple[bool, bool, bool, bool]:
+        variables = getattr(self, "permission_variables", None)
+        if variables is None:
+            return False, False, False, False
+        return (
+            variables[0].get() is True,
+            variables[1].get() is True,
+            variables[2].get() is True,
+            variables[3].get() is True,
+        )
 
     def _parameters_changed(self, *_trace_details: Any) -> None:
         self.diagnostics.cancel()
@@ -457,6 +521,10 @@ class _DesktopWindow:
         generation = diagnostics.generation if diagnostics is not None else None
         parameters = self._parameters()
         initialize_empty = self.initialize.get() is True
+        permissions = self._permissions()
+        if permissions[2] and not permissions[0] or permissions[3] and not permissions[1]:
+            self.status.set("执行任务前，请同时启用对应的模型配置或抖音登录能力。")
+            return
         if not report["capabilities"]["ready_for_management_page"]:
             self.status.set("启动依赖未就绪；请配置运行环境后重试。")
             return
@@ -476,6 +544,15 @@ class _DesktopWindow:
         elif state != "initialized_candidate":
             self.status.set("目录不可用，或含有未识别的资料；不会覆盖或自动迁移。")
             return
+        if any(permissions) and not self.messagebox.askyesno(
+            "确认本次启动能力",
+            "仅启用勾选的能力。模型密钥暂存独立私有文件，尚未接系统加密凭据库。\n"
+            "启用执行会处理本库已确认的排队任务；模型任务可能计费，来源任务可能下载。\n"
+            "仅配置或登录不会执行任务。确认继续？",
+            parent=self.root,
+        ):
+            self.status.set("已取消本次能力启用，未启动服务。")
+            return
         # askyesno has a nested Tk event loop: Stop/Close/parameter edits can run
         # during the dialog. Consent never authorizes an obsolete check.
         if (
@@ -484,6 +561,7 @@ class _DesktopWindow:
             or (diagnostics is not None and diagnostics.generation != generation)
             or parameters != self._parameters()
             or initialize_empty != (self.initialize.get() is True)
+            or permissions != self._permissions()
         ):
             return
         workspace, port = parameters
@@ -491,7 +569,8 @@ class _DesktopWindow:
         if cached is not None and cached.workspace is not None:
             workspace = cached.workspace
         self._start_intent = None
-        self.controller.start(workspace, port=port, initialize_empty=initialize_empty)
+        options = {"desktop_permissions": permissions} if any(permissions) else {}
+        self.controller.start(workspace, port=port, initialize_empty=initialize_empty, **options)
         self._controls(True)
 
     def _controls(self, active: bool) -> None:
@@ -500,6 +579,7 @@ class _DesktopWindow:
             self.choose_button,
             self.init_check,
             self.port_entry,
+            *getattr(self, "permission_checks", ()),
         ):
             widget.configure(state="disabled" if active or self.close_requested else "normal")
         self.start_button.configure(

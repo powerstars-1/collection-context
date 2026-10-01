@@ -9,7 +9,6 @@ import os
 import signal
 import sys
 import threading
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 from collection_context.processing.profiles import ModelCatalog
 from collection_context.sources.browser_source import DouyinBrowserSource
+from collection_context.sources.session import source_session
 from collection_context.workflows.connection import ConnectionCatalog, ConnectionWorkflow
 from collection_context.workflows.extraction import ExtractionWorkflow
 from collection_context.workflows.ingestion import IngestionWorkflow
@@ -211,20 +211,6 @@ def local_media(path: Path) -> tuple[bytes, str]:
 
 def no_model_authority(_: str) -> str:
     raise ContextError("processing_authorization_required", "来源同步未授权模型请求或秘密读取。")
-
-
-@contextmanager
-def source_session(
-    store: LibraryStore, profile: Path, *, headless: bool = True, runtime_dir: Path | None = None
-):
-    profile = profile.absolute()
-    root = store.files.root.resolve()
-    resolved = profile.resolve()
-    if resolved.is_relative_to(root) or root.is_relative_to(resolved):
-        raise ContextError("unsafe_login_profile", "登录目录必须与可导出资料库分开。")
-    options = {"runtime_dir": runtime_dir, "library_dir": store.files.root} if runtime_dir is not None else {}
-    with BrowserSession(profile, headless=headless, **options) as browser:
-        yield DouyinBrowserSource(browser)
 
 
 def main(argv: list[str] | None = None) -> int:

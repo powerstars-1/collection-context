@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import secrets
 import threading
 from collections.abc import Callable
@@ -153,13 +154,15 @@ class ConnectionRunner:
                 self._status["state"] = "cancelling"
             return self._public()
 
-    def close(self) -> None:
+    def close(self, *, timeout: float | None = 35) -> None:
+        if timeout is not None and (
+            type(timeout) not in {int, float} or not math.isfinite(timeout) or timeout < 0
+        ):
+            raise ContextError("invalid_argument", "关闭等待时间须为非负有限秒数。")
         with self._lock:
-            if self._closed:
-                return
             self._closed = True
             self._stop.set()
             thread = self._thread
-        if thread and thread.ident is not None:
-            thread.join(timeout=35)
+        if thread and thread.ident is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout)
         # A still-finishing thread has its own resources. No new observation is admitted.

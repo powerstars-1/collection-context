@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import signal
@@ -13,11 +14,13 @@ import urllib.error
 import urllib.request
 import webbrowser
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import Any, TextIO
 
 from collection_context.application.contracts import ContextError
+from collection_context.application.execution_runner import ExecutionRunner
+from collection_context.application.launcher_capabilities import LauncherCapabilities, launcher_resources
 from collection_context.diagnostics import default_workspace, startup_report, workspace_report
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.http import create_app
@@ -163,7 +166,7 @@ def _print_capability_summary(report: dict[str, Any], output: TextIO) -> None:
 
 
 @contextmanager
-def _ordered_exit_signals(server):
+def _ordered_exit_signals(server, execution: ExecutionRunner | None = None):
     """Let Uvicorn drain requests without re-raising the terminating signal afterward."""
     if threading.current_thread() is not threading.main_thread():
         yield
@@ -172,6 +175,8 @@ def _ordered_exit_signals(server):
     previous = {item: signal.getsignal(item) for item in watched}
 
     def request_exit(*_):
+        if execution is not None:
+            execution.stop()
         server.should_exit = True
 
     try:
@@ -183,13 +188,55 @@ def _ordered_exit_signals(server):
             signal.signal(item, handler)
 
 
-def _watch_stop_request(server: Any, requested: threading.Event, finished: threading.Event) -> None:
+def _watch_stop_request(
+    server: Any,
+    requested: threading.Event,
+    finished: threading.Event,
+    execution: ExecutionRunner | None = None,
+) -> None:
     """Bridge the desktop stop control to Uvicorn without killing another process."""
     while not finished.is_set():
         if requested.wait(0.1):
+            if execution is not None:
+                execution.stop()
             finished.set()
             server.should_exit = True
             return
+
+
+def _attach_execution_lifecycle(app: Any, capabilities: LauncherCapabilities) -> None:
+    """Own the executor inside HTTP lifespan; drain it before setup resources close.
+
+    Individual jobs retain their original confirmation gates. This explicit startup
+    permission can resume already-authorized queued work; it never creates jobs.
+    """
+    if not (capabilities.allow_model_calls or capabilities.allow_source_sync):
+        return
+    runner = ExecutionRunner(
+        capabilities.workspace,
+        credential_dir=capabilities.credential_dir,
+        browser_dir=capabilities.browser_dir,
+        runtime_dir=capabilities.runtime_dir,
+    )
+    original = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async with original(application) as state:
+            try:
+                runner.start(
+                    allow_model_calls=capabilities.allow_model_calls,
+                    allow_source_sync=capabilities.allow_source_sync,
+                    execution_confirmed=True,
+                )
+                yield state
+            finally:
+                runner.stop()
+                # Do not freeze HTTP's event loop or pretend a timeout killed work.
+                await asyncio.to_thread(runner.close)
+
+    app.router.lifespan_context = lifespan
+    app.state.execution_runner = runner
 
 
 def launch(
@@ -202,9 +249,16 @@ def launch(
     open_page: Callable[[str], Any] = webbrowser.open,
     owner_presenter: Callable[[str], bool] | None = None,
     stop_event: threading.Event | None = None,
+    capabilities: LauncherCapabilities | None = None,
 ) -> int:
     if stop_event is not None and stop_event.is_set():
         return 0
+    if capabilities is not None:
+        capabilities.validate()
+        if capabilities.workspace != workspace.absolute():
+            raise ContextError("launcher_capabilities_invalid", "启动能力必须绑定当前资料库。")
+    else:
+        capabilities = LauncherCapabilities(workspace.absolute())
     report = startup_report(workspace, port)
     if not report["capabilities"]["ready_for_management_page"]:
         raise ContextError("dependency_required", "管理页依赖未就绪；请安装本产品的 launcher 可选依赖。")
@@ -212,7 +266,8 @@ def launch(
         raise ContextError("port_unavailable", "本机端口不可用，请停止占用进程或通过 --port 选择其他端口。")
 
     store, created = _prepare_workspace(workspace, initialize_empty=initialize_empty)
-    try:
+    with ExitStack() as cleanup:
+        cleanup.callback(store.close)
         if created:
             print(f"已初始化新的产品资料库：{store.files.root}", file=output)
         _ensure_owner_access(store, output, owner_presenter=owner_presenter)
@@ -223,7 +278,15 @@ def launch(
         origin = f"http://{LOOPBACK}:{port}"
         policy = AccessPolicy(origin, registry.credentials())
         print("正在加载本机管理页；首次启动可能需要几秒。", file=output)
-        app = create_app(store.files.root, policy, refresh=lambda: registry.refresh(policy))
+        resources = cleanup.enter_context(launcher_resources(capabilities, headless=no_browser))
+        app = create_app(
+            store.files.root,
+            policy,
+            refresh=lambda: registry.refresh(policy),
+            model_secrets=resources.model_secrets,
+            connection_runner=resources.connection_runner,
+        )
+        _attach_execution_lifecycle(app, capabilities)
         try:
             import uvicorn
         except ImportError:
@@ -245,6 +308,7 @@ def launch(
             timeout_keep_alive=5,
         )
         server = uvicorn.Server(config)
+        execution = getattr(app.state, "execution_runner", None)
         stopped = threading.Event()
         ready = threading.Thread(
             target=_wait_for_ready,
@@ -258,13 +322,13 @@ def launch(
         if stop_event is not None:
             watcher = threading.Thread(
                 target=_watch_stop_request,
-                args=(server, stop_event, stopped),
+                args=(server, stop_event, stopped, execution),
                 name="collection-context-desktop-stop",
                 daemon=True,
             )
             watcher.start()
         try:
-            with _ordered_exit_signals(server):
+            with _ordered_exit_signals(server, execution):
                 server.run()
         finally:
             stopped.set()
@@ -275,8 +339,6 @@ def launch(
             raise ContextError("startup_failed", "管理页服务未成功启动。")
         print("管理页已停止，资料库保持原位。", file=output)
         return 0
-    finally:
-        store.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -154,7 +154,7 @@ def test_source_session_passes_owner_fixed_runtime_without_persisting_it(tmp_pat
         def __exit__(self, *_):
             pass
 
-    monkeypatch.setattr("collection_context.cli.BrowserSession", Browser)
+    monkeypatch.setattr("collection_context.sources.session.BrowserSession", Browser)
     try:
         before = store.snapshot()
         with source_session(store, tmp_path / "profile", runtime_dir=tmp_path / "runtime"):

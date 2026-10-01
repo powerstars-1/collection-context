@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.browser_ownership import (
+    PROFILE_MARKER,
+    PROFILE_MARKER_BODY,
+    BrowserLease,
+    profile_marker,
+)
 from collection_context.infrastructure.files import SafeFiles
+from collection_context.infrastructure.platform_safety import require_ownership_runtime
 from collection_context.infrastructure.runtime_dependencies import RuntimeDependencies
 
 if TYPE_CHECKING:
@@ -33,9 +39,24 @@ class BrowserSession:
         self.runtime_dir = runtime_dir
         self.library_dir = library_dir
         self.runtime: Playwright | None = None
-        self.context: BrowserContext | None = None
+        self._context: BrowserContext | None = None
+        self._lease: BrowserLease | None = None
+
+    @property
+    def context(self) -> BrowserContext | None:
+        if self._context is not None:
+            self.check()
+        return self._context
+
+    def check(self) -> None:
+        if self._lease is None:
+            raise ContextError("browser_not_owned", "当前没有独立浏览器所有权。")
+        self._lease.check()
 
     def __enter__(self):
+        if self._lease is not None or self.runtime is not None or self._context is not None:
+            raise ContextError("browser_busy", "此浏览器生命周期仍在运行或退出中，未重复启动。")
+        require_ownership_runtime()  # Windows stays fail-closed, before profile creation.
         dependencies = None
         expected_tool = None
         role = "chromium_headless_shell" if self.headless else "chromium"
@@ -51,7 +72,7 @@ class BrowserSession:
             raise ContextError("unsafe_login_profile", "登录目录不能为链接。")
         existed = self.profile_dir.exists()
         empty = not existed or (self.profile_dir.is_dir() and not any(self.profile_dir.iterdir()))
-        marker = "collection-browser-profile.json"
+        marker = PROFILE_MARKER
         if not empty and not (self.profile_dir / marker).is_file():
             raise ContextError(
                 "foreign_login_profile", "不能借用其他项目或日常浏览器的账号目录，请指定新目录。"
@@ -65,22 +86,23 @@ class BrowserSession:
                 raise ContextError("unsafe_login_profile", "独立登录目录应仅当前用户可读写。")
         with SafeFiles(self.profile_dir) as files:
             if empty:
-                files.write(marker, b'{"schema_version":1,"owner":"collection-context"}\n')
-            else:
                 try:
-                    config = json.loads(files.read(marker, max_bytes=1024, private=True))
-                    if config != {"schema_version": 1, "owner": "collection-context"}:
-                        raise ValueError
-                except (ValueError, TypeError):
-                    raise ContextError(
-                        "foreign_login_profile", "登录目录身份不符，不导入其他项目账号。"
-                    ) from None
+                    files.write(marker, PROFILE_MARKER_BODY)
+                except ContextError as error:
+                    # A simultaneous first initialization may have published
+                    # the same product marker. Validate it; never overwrite it.
+                    if error.code != "write_conflict":
+                        raise
+            checked_marker = profile_marker(files)
+            self._lease = BrowserLease(self.profile_dir, root_identity=files.identity, marker=checked_marker)
         try:
             from playwright.sync_api import sync_playwright
 
+            self.check()
             if dependencies is not None and dependencies.resolve(role) != expected_tool:
                 raise ContextError("runtime_dependency_integrity", "启动期间浏览器依赖版本改变，未切换执行。")
             self.runtime = sync_playwright().start()
+            self.check()
             options: _LaunchOptions = {}
             if dependencies is not None:
                 # Recheck just before launch; a configured failure never falls back to SDK caches.
@@ -90,15 +112,18 @@ class BrowserSession:
                         "runtime_dependency_integrity", "启动期间浏览器依赖版本改变，未切换执行。"
                     )
                 options["executable_path"] = str(actual_tool.path)
-            self.context = self.runtime.chromium.launch_persistent_context(
+            self.check()
+            self._context = self.runtime.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 headless=self.headless,
                 viewport={"width": 1200, "height": 850},
                 accept_downloads=False,
                 **options,
             )
+            self.check()
             return self
         except ImportError:
+            self.close()
             raise ContextError("browser_unavailable", "未安装浏览器接入依赖。") from None
         except ContextError:
             self.close()
@@ -108,18 +133,42 @@ class BrowserSession:
             raise ContextError(
                 "browser_start_failed", "独立浏览器未启动，请检查浏览器文件和系统依赖。"
             ) from None
+        except BaseException:
+            self.close()
+            raise
 
     def close(self):
-        try:
-            if self.context:
-                self.context.close()
-        finally:
-            if self.runtime:
+        failed = False
+        if self._context is not None:
+            try:
+                self._context.close()
+            except BaseException:
+                failed = True
+            else:
+                self._context = None
+        if self.runtime is not None:
+            try:
                 self.runtime.stop()
-            self.context = self.runtime = None
+            except BaseException:
+                failed = True
+            else:
+                self.runtime = None
+        # Do not tell another session it is safe to use the same profile when
+        # shutdown did not confirm both SDK/context resources have exited.
+        if self._context is None and self.runtime is None and self._lease is not None:
+            self._lease.close()
+            self._lease = None
+        if failed:
+            raise ContextError(
+                "browser_stop_failed", "浏览器退出未确认，仍保留账号目录所有权；不会启动第二个实例。"
+            ) from None
 
     def __exit__(self, *_):
-        self.close()
+        try:
+            if self._lease is not None:
+                self.check()
+        finally:
+            self.close()
 
     def probe_public_site(self) -> dict:
         """Read a public page only; lack of a login button does not prove authenticated access."""
