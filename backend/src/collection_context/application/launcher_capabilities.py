@@ -2,8 +2,8 @@
 
 Construction only inspects paths. No credentials, platform pages, processes,
 receipts or model requests are read or executed. The resource factory uses the
-explicit, UNENCRYPTED FileSecrets fallback; system credential integration remains
-unfinished. Opening resources does not start a worker or authorize queued work.
+explicit credential backend; private-file is an UNENCRYPTED service option, not a
+fallback after a system error. Opening resources never authorizes queued work.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.platform_safety import require_safe_files_runtime
 from collection_context.infrastructure.runtime_dependencies import RECEIPT_NAME
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
+from collection_context.infrastructure.system_secrets import SystemSecrets
 
 
 def _invalid() -> ContextError:
@@ -82,11 +83,17 @@ class LauncherCapabilities:
     credential_dir: Path | None = None
     browser_dir: Path | None = None
     runtime_dir: Path | None = None
+    credential_backend: str = "private-file"
 
     def __post_init__(self) -> None:
         self.validate()
 
     def validate(self) -> None:
+        if type(self.credential_backend) is not str or self.credential_backend not in {
+            "private-file",
+            "system",
+        }:
+            raise _invalid()
         flags = (
             self.allow_model_config,
             self.allow_source_connect,
@@ -173,15 +180,16 @@ def default_desktop_capabilities(
         allow_source_connect=allow_source_connect,
         allow_model_calls=allow_model_calls,
         allow_source_sync=allow_source_sync,
-        credential_dir=root / "credentials" if allow_model_config else None,
+        credential_dir=root / "credentials-system" if allow_model_config else None,
         browser_dir=root / "browser" if allow_source_connect else None,
         runtime_dir=runtime if info is not None else None,
+        credential_backend="system",
     )
 
 
 @dataclass(frozen=True)
 class LauncherResources:
-    model_secrets: FileSecrets | None = None
+    model_secrets: CredentialBackend | None = None
     connection_runner: ConnectionRunner | None = None
     credential_storage: str = "not_enabled"
     worker_started: bool = False
@@ -195,7 +203,7 @@ def launcher_resources(
 
     No browser profile is created until an explicitly requested ConnectionRunner
     operation. Existing key files are not read while opening the secret backend.
-    Model and source execution grants are carried by configuration, not exercised.
+    System backend failure never falls back to plaintext or imports older files.
     """
     if not isinstance(capabilities, LauncherCapabilities) or type(headless) is not bool:
         raise _invalid()
@@ -205,10 +213,11 @@ def launcher_resources(
         runner = None
         if capabilities.allow_model_config:
             assert capabilities.credential_dir is not None
+            backend = SystemSecrets if capabilities.credential_backend == "system" else FileSecrets
             secrets = (
-                FileSecrets(capabilities.credential_dir)
+                backend(capabilities.credential_dir)
                 if capabilities.credential_dir.exists()
-                else FileSecrets.initialize(capabilities.credential_dir)
+                else backend.initialize(capabilities.credential_dir)
             )
             cleanup.callback(secrets.close)
         if capabilities.allow_source_connect:
@@ -225,5 +234,5 @@ def launcher_resources(
         yield LauncherResources(
             model_secrets=secrets,
             connection_runner=runner,
-            credential_storage="private_service_files_not_encrypted" if secrets else "not_enabled",
+            credential_storage=secrets.storage_kind if secrets else "not_enabled",
         )

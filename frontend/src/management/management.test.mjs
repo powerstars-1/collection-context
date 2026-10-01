@@ -66,6 +66,27 @@ const routes = { "/v1/collections/overview": overview, "/v1/management/overview"
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 const defer = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
 
+test("model storage labels distinguish OS keychain, unencrypted files and an unknown backend", async () => {
+  for (const [kind, expected, forbidden] of [
+    ["macos_keychain", "系统钥匙串", "私有文件，尚未加密"],
+    ["private_service_files_not_encrypted", "私有文件，尚未加密", "系统钥匙串"],
+    ["unknown", "存储方式尚未验证", "系统钥匙串"],
+  ]) {
+    const calls = [];
+    const { controller, nodes } = fixture(async (path) => {
+      calls.push(path);
+      return path === "/v1/management/models"
+        ? { ...modelData, configuration_enabled: true, credential_storage: kind }
+        : routes[path];
+    });
+    await controller.show("settings");
+    assert.ok(nodes["model-state"].textContent.includes(expected));
+    assert.ok(!nodes["model-state"].textContent.includes(forbidden));
+    assert.ok(calls.every((path) => !path.includes("model-save")));
+    controller.destroy();
+  }
+});
+
 test("read-only session never queries owner management or writes through disabled controls", async () => {
   const calls = [];
   const { controller, nodes } = fixture(async (path) => { calls.push(path); return routes[path]; }, false);

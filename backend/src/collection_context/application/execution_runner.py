@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
+from collection_context.infrastructure.system_secrets import SystemSecrets
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.library.store import LibraryStore
 from collection_context.sources.browser_source import DouyinBrowserSource
@@ -36,6 +37,17 @@ _SAFE_CODES = (
         "runtime_directory_overlap",
         "execution_directory_overlap",
         "execution_failed",
+        "credential_denied",
+        "credential_locked",
+        "credential_unavailable",
+        "credential_backend_unsupported",
+        "credential_backend_conflict",
+        "system_secret_outcome_unknown",
+        "system_secret_unsupported",
+        "system_secret_directory_invalid",
+        "system_secret_directory_changed",
+        "system_secret_metadata_invalid",
+        "credential_backend_mismatch",
     }
 )
 _JOB_STATES = {"succeeded", "partial", "failed", "blocked", "cancelled"}
@@ -46,7 +58,9 @@ class _Operation(Protocol):
     def serve(self, **kwargs: Any) -> dict[str, Any]: ...
 
 
-OperationFactory = Callable[[LibraryStore, FileSecrets | None, SourceFactory | None, Path | None], _Operation]
+OperationFactory = Callable[
+    [LibraryStore, CredentialBackend | None, SourceFactory | None, Path | None], _Operation
+]
 Directories = tuple[Path, Path | None, Path | None, Path | None]
 
 
@@ -73,8 +87,12 @@ class ExecutionRunner:
         credential_dir: Path | None = None,
         browser_dir: Path | None = None,
         runtime_dir: Path | None = None,
+        credential_backend: str = "private-file",
         _operation_factory: OperationFactory | None = None,
     ) -> None:
+        if type(credential_backend) is not str or credential_backend not in {"private-file", "system"}:
+            raise ContextError("invalid_argument", "凭据后端只能由本机启动配置明确选择。")
+        self._credential_backend = credential_backend
         self._directories = self._check_paths(workspace, credential_dir, browser_dir, runtime_dir)
         self._operation_factory = _operation_factory or self._operation
         self._lock = threading.Lock()
@@ -86,6 +104,10 @@ class ExecutionRunner:
         self._allow_sources = False
         self._handled = 0
         self._error_code: str | None = None
+
+    @property
+    def credential_backend(self) -> str:
+        return self._credential_backend
 
     @staticmethod
     def _check_paths(
@@ -185,7 +207,7 @@ class ExecutionRunner:
     @staticmethod
     def _operation(
         store: LibraryStore,
-        secrets: FileSecrets | None,
+        secrets: CredentialBackend | None,
         source_factory: SourceFactory | None,
         runtime_dir: Path | None,
     ) -> BackgroundWorker:
@@ -220,10 +242,14 @@ class ExecutionRunner:
                     handles.callback(store.close)
                     if stop.is_set():
                         return
-                    secrets = None
+                    secrets: CredentialBackend | None = None
                     if allow_models:
                         assert self.credential_dir is not None
-                        secrets = FileSecrets(self.credential_dir)
+                        secrets = (
+                            SystemSecrets(self.credential_dir)
+                            if self.credential_backend == "system"
+                            else FileSecrets(self.credential_dir)
+                        )
                         handles.callback(secrets.close)
                     if stop.is_set():
                         return

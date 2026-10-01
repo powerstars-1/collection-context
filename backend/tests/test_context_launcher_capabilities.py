@@ -160,7 +160,8 @@ def test_defaults_no_cwd_env_or_old_configuration(tmp_path, monkeypatch):
     config = default_desktop_capabilities(
         tmp_path / "external", allow_model_config=True, allow_source_connect=True
     )
-    assert config.credential_dir == root / "credentials"
+    assert config.credential_dir == root / "credentials-system"
+    assert config.credential_backend == "system"
     assert config.browser_dir == root / "browser"
     assert config.runtime_dir is None
     assert not root.exists()

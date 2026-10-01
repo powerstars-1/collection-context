@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
 from collection_context.library.store import LibraryStore
 from collection_context.processing.profiles import ROLES, ModelCatalog
 
@@ -19,7 +19,7 @@ def separate_credentials(workspace: Path, credential_dir: Path) -> None:
 
 
 class ModelSetup:
-    def __init__(self, store: LibraryStore, secrets: FileSecrets | None = None):
+    def __init__(self, store: LibraryStore, secrets: CredentialBackend | None = None):
         if secrets is not None:
             separate_credentials(store.files.root, secrets.files.root)
         self.store, self.secrets = store, secrets
@@ -43,9 +43,7 @@ class ModelSetup:
         return {
             "roles": roles,
             "configuration_enabled": self.secrets is not None,
-            "credential_storage": "private_service_files_not_encrypted"
-            if self.secrets is not None
-            else "not_enabled",
+            "credential_storage": self.secrets.storage_kind if self.secrets is not None else "not_enabled",
             "model_requests": 0,
         }
 

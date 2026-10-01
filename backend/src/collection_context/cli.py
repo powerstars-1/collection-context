@@ -17,7 +17,8 @@ from collection_context.application.contracts import ContextError, envelope
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.browser import BrowserSession
 from collection_context.infrastructure.files import SafeFiles
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
+from collection_context.infrastructure.system_secrets import SystemSecrets
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
@@ -80,7 +81,8 @@ def parser() -> argparse.ArgumentParser:
     credential = model.add_mutually_exclusive_group(required=True)
     credential.add_argument("--credential-ref", help="已存独立凭据的引用，不是API Key")
     credential.add_argument("--prompt-key", action="store_true", help="仅从交互终端无回显输入模型Key")
-    model.add_argument("--credential-dir", type=Path, help="与库分开的私有服务凭据目录；文件不是加密钥匙串")
+    model.add_argument("--credential-dir", type=Path, help="与库分开的固定凭据目录；秘密不导出")
+    model.add_argument("--credential-backend", choices=("private-file", "system"), default="private-file")
     prepare = commands.add_parser("prepare-video", help="本地视频准备、登记输入；不请求模型")
     prepare.add_argument("--ref", required=True)
     prepare.add_argument("--input", type=Path, required=True)
@@ -94,12 +96,14 @@ def parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run-job", help="本地显式执行一个提取任务；会上传登记媒体并可能计费")
     run.add_argument("--job-id", required=True)
     run.add_argument("--credential-dir", type=Path, required=True)
+    run.add_argument("--credential-backend", choices=("private-file", "system"), default="private-file")
     job = commands.add_parser("job-status", help="只查看本地拥有者任务，不派发、不重试")
     job.add_argument("--job-id", required=True)
     cancel = commands.add_parser("cancel-job", help="取消指定任务；已发出的请求仍可能产生费用")
     cancel.add_argument("--job-id", required=True)
     worker = commands.add_parser("worker", help="串行执行已授权任务；来源与模型权限分开，不重试阻塞任务")
     worker.add_argument("--credential-dir", type=Path, help="仅允许模型请求时必需；来源同步不读取模型秘密")
+    worker.add_argument("--credential-backend", choices=("private-file", "system"), default="private-file")
     worker.add_argument(
         "--allow-source-sync", action="store_true", help="明确允许执行已排队固定来源同步，不授权模型费用"
     )
@@ -217,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     data: Any
     store = None
-    secrets = None
+    secrets: CredentialBackend | None = None
     try:
         if args.command == "init":
             store = LibraryStore.initialize(args.workspace)
@@ -287,10 +291,11 @@ def main(argv: list[str] | None = None) -> int:
                             "interactive_credential_required",
                             "请在交互终端指定独立凭据目录，无回显输入Key；不要传命令行Key。",
                         )
+                    backend = SystemSecrets if args.credential_backend == "system" else FileSecrets
                     secrets = (
-                        FileSecrets(args.credential_dir)
+                        backend(args.credential_dir)
                         if args.credential_dir.exists()
-                        else FileSecrets.initialize(args.credential_dir)
+                        else backend.initialize(args.credential_dir)
                     )
                     ExtractionWorkflow(
                         store, secrets.get
@@ -327,7 +332,8 @@ def main(argv: list[str] | None = None) -> int:
                     args.input_id, idempotency_key=args.idempotency_key, max_calls=args.max_calls
                 )
             elif args.command == "run-job":
-                secrets = FileSecrets(args.credential_dir)
+                backend = SystemSecrets if args.credential_backend == "system" else FileSecrets
+                secrets = backend(args.credential_dir)
                 data = ExtractionWorkflow(store, secrets.get).run(args.job_id)
             elif args.command == "job-status":
                 data = JobManager(store).get(args.job_id)
@@ -405,7 +411,8 @@ def main(argv: list[str] | None = None) -> int:
                 if args.allow_source_sync and args.browser_dir is None:
                     raise ContextError("source_setup_required", "允许来源同步时须提供本产品独立浏览器目录。")
                 if args.allow_model_calls:
-                    secrets = FileSecrets(args.credential_dir)
+                    backend = SystemSecrets if args.credential_backend == "system" else FileSecrets
+                    secrets = backend(args.credential_dir)
                 workflow = ExtractionWorkflow(store, secrets.get if secrets else no_model_authority)
                 sync_workflow = (
                     SynchronizationWorkflow(

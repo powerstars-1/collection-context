@@ -217,6 +217,7 @@ def _attach_execution_lifecycle(app: Any, capabilities: LauncherCapabilities) ->
         credential_dir=capabilities.credential_dir,
         browser_dir=capabilities.browser_dir,
         runtime_dir=capabilities.runtime_dir,
+        credential_backend=capabilities.credential_backend,
     )
     original = app.router.lifespan_context
 

@@ -6,12 +6,31 @@ import os
 import stat
 import uuid
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from collection_context.application.contracts import ContextError, valid_id
 from collection_context.infrastructure.files import SafeFiles
 
+SYSTEM_SECRET_MANIFEST = "collection-system-secrets.json"
+
+
+@runtime_checkable
+class CredentialBackend(Protocol):
+    files: SafeFiles
+    storage_kind: str
+
+    def put(self, value: str) -> str: ...
+
+    def get(self, ref: str) -> str: ...
+
+    def discard_new(self, ref: str) -> None: ...
+
+    def close(self) -> None: ...
+
 
 class FileSecrets:
+    storage_kind = "private_service_files_not_encrypted"
+
     def __init__(self, root: Path):
         self.files = SafeFiles(root)
         try:
@@ -33,6 +52,21 @@ class FileSecrets:
         info = os.fstat(self.files.fd)
         if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
             raise ContextError("unsafe_secret_permissions", "凭据目录须由运行用户拥有且仅允许该用户访问。")
+        try:
+            # Presence alone (including a broken link or damaged manifest) means
+            # this cannot be a legacy plaintext backend. Never parse metadata as
+            # an API key or fall back after a system-directory identity failure.
+            os.stat(SYSTEM_SECRET_MANIFEST, dir_fd=self.files.fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise ContextError(
+                "credential_backend_mismatch", "凭据目录后端身份无法确认；未读取密钥。"
+            ) from None
+        else:
+            raise ContextError(
+                "credential_backend_mismatch", "系统凭据目录不能作为普通文件凭据打开；未读取密钥。"
+            )
 
     @staticmethod
     def _ref(ref: str) -> str:

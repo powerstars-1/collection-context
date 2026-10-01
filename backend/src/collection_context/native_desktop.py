@@ -22,6 +22,14 @@ from collection_context.diagnostics import default_workspace, startup_report
 from collection_context.native_bootstrap import _TokenWindow, present_owner_token
 
 _SAFE_ERRORS = {
+    "system_secret_unsupported": "当前系统凭据库尚不可用；未改用明文文件。",
+    "system_secret_directory_invalid": "系统凭据目录身份不符；没有迁移或读取旧密钥。",
+    "credential_backend_mismatch": "凭据目录后端不匹配；未把元数据当成密钥。",
+    "credential_backend_unsupported": "当前系统凭据库尚不可用；未改用明文文件。",
+    "credential_backend_conflict": "凭据后端身份不匹配；没有迁移或读取旧密钥。",
+    "credential_denied": "系统拒绝凭据访问；未自动授权或改用明文文件。",
+    "credential_locked": "系统凭据库已锁定；请自行解锁后重试。",
+    "credential_unavailable": "系统凭据库不可用；未自动重试或改用明文文件。",
     "launcher_capabilities_invalid": "启动能力配置不完整；执行必须先启用对应配置或登录能力。",
     "launcher_directory_unsafe": "产品配置目录不符合隔离要求；没有修改原目录权限。",
     "workspace_initialization_required": "请明确同意建立一个空资料库。",
@@ -393,7 +401,7 @@ class _DesktopWindow:
             self.permission_checks = []
             for label, variable in zip(
                 (
-                    "允许配置模型（开发候选：密钥保存在独立私有文件，尚未加密）",
+                    "允许配置模型（优先系统凭据库；不可用时不自动降级）",
                     "允许在独立浏览器登录抖音（不等于允许同步）",
                     "执行已确认的模型任务（需允许配置模型，可能计费）",
                     "执行已确认的来源任务（需允许登录，可能下载媒体）",
@@ -546,7 +554,7 @@ class _DesktopWindow:
             return
         if any(permissions) and not self.messagebox.askyesno(
             "确认本次启动能力",
-            "仅启用勾选的能力。模型密钥暂存独立私有文件，尚未接系统加密凭据库。\n"
+            "仅启用勾选的能力。模型密钥使用系统凭据库；不可用时不会改存明文。\n"
             "启用执行会处理本库已确认的排队任务；模型任务可能计费，来源任务可能下载。\n"
             "仅配置或登录不会执行任务。确认继续？",
             parent=self.root,

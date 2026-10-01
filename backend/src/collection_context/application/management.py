@@ -9,7 +9,7 @@ from collection_context.application.contracts import ContextError, envelope
 from collection_context.application.model_setup import ModelSetup
 from collection_context.application.source_management import SourceManagement
 from collection_context.infrastructure.ownership import WorkerLease
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.library.store import LibraryStore
 from collection_context.workflows.addition import AdditionWorkflow
 from collection_context.workflows.extraction import ExtractionWorkflow
@@ -26,7 +26,7 @@ class ManagementService:
         self,
         store: LibraryStore,
         *,
-        model_secrets: FileSecrets | None = None,
+        model_secrets: CredentialBackend | None = None,
         connection_runner: ConnectionRunner | None = None,
     ):
         self.store = store

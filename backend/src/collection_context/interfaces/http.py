@@ -20,7 +20,7 @@ from collection_context.application.library_management import LibraryManagement
 from collection_context.application.management import ManagementService
 from collection_context.application.media_evidence import MediaEvidence
 from collection_context.application.service import ContextService
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.security import AccessPolicy
 from collection_context.library.store import LibraryStore
@@ -243,7 +243,7 @@ def create_app(
     policy: AccessPolicy,
     *,
     refresh: Callable[[], None] | None = None,
-    model_secrets: FileSecrets | None = None,
+    model_secrets: CredentialBackend | None = None,
     connection_runner: ConnectionRunner | None = None,
 ):
     try:

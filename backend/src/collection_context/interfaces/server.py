@@ -10,7 +10,8 @@ from urllib.parse import urlsplit
 from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError
 from collection_context.application.model_setup import separate_credentials
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
+from collection_context.infrastructure.system_secrets import SystemSecrets
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.http import create_app
 from collection_context.interfaces.security import AccessPolicy
@@ -28,12 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tls-key", type=Path)
     parser.add_argument("--allow-model-config", action="store_true")
     parser.add_argument("--credential-dir", type=Path)
+    parser.add_argument("--credential-backend", choices=("private-file", "system"), default="private-file")
     parser.add_argument("--allow-source-connect", action="store_true")
     parser.add_argument("--browser-dir", type=Path)
     parser.add_argument("--source-connect-headless", action="store_true")
     args = parser.parse_args(argv)
     store = None
-    model_secrets = None
+    model_secrets: CredentialBackend | None = None
     connection_runner = None
     try:
         if args.bind not in {"127.0.0.1", "::1", "localhost"} and not args.remote:
@@ -70,10 +72,11 @@ def main(argv: list[str] | None = None) -> int:
             raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
         if args.allow_model_config:
             separate_credentials(args.workspace, args.credential_dir)
+            backend = SystemSecrets if args.credential_backend == "system" else FileSecrets
             model_secrets = (
-                FileSecrets(args.credential_dir)
+                backend(args.credential_dir)
                 if args.credential_dir.exists()
-                else FileSecrets.initialize(args.credential_dir)
+                else backend.initialize(args.credential_dir)
             )
         if args.allow_source_connect:
             connection_runner = ConnectionRunner(

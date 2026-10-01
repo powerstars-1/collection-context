@@ -117,8 +117,12 @@ async function loadModels() {
 }
 function renderModels(data) {
   modelEpoch++;
+  const storage = {
+    macos_keychain: "密钥保存在 macOS 系统钥匙串，库外只存受控引用，不导出密钥。",
+    private_service_files_not_encrypted: "密钥写入固定的库外私有文件，尚未加密。",
+  }[data.credential_storage] || "凭据存储方式尚未验证；请查看后台配置。";
   $("model-state").textContent = data.configuration_enabled
-    ? "模型配置已单独授权。密钥写入固定的库外私有文件，尚不是加密钥匙串；不进入资料、导出或AI读接口。旧任务所需凭据保留，轮换默认值不会撤销旧凭据。"
+    ? `模型配置已单独授权。${storage} 不进入资料、导出或AI读接口。旧任务所需凭据保留，轮换默认值不会撤销旧凭据。`
     : "本次后台未开启模型配置。需在启动时明确授权并指定库外私有凭据目录；页面不能选择文件路径或自动读取其他项目密钥。";
   $("model-forms").replaceChildren();
   const names = { audio: "音频转写", vision: "画面与图片", summary: "内容总结" };

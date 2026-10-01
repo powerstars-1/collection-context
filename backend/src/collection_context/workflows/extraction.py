@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest
-from collection_context.infrastructure.secrets import FileSecrets
+from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 from collection_context.processing.profiles import ModelCatalog
@@ -24,7 +24,7 @@ from collection_context.workflows.policy import execution_allowed
 class ExtractionWorkflow:
     def __init__(self, store: LibraryStore, resolve_secret: Callable[[str], str]):
         backend = getattr(resolve_secret, "__self__", None)
-        if isinstance(backend, FileSecrets):
+        if isinstance(backend, CredentialBackend):
             library, secrets = store.files.root.resolve(), backend.files.root.resolve()
             if library.is_relative_to(secrets) or secrets.is_relative_to(library):
                 raise ContextError(
