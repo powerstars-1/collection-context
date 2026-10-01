@@ -3,41 +3,56 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>收藏上下文 · 开发预览</title>
+    <title>收藏上下文 · 你的灵感资料库</title>
+    <meta name="description" content="保存抖音喜欢、收藏与博主作品，查看原文、转写和画面证据，让你的 AI 按需引用。" />
     <link rel="stylesheet" href="/assets/app.css" />
     <script src="/assets/app.js" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="/"
-        ><span class="brand-mark">藏</span>收藏上下文<span class="dev"
-          >开发预览</span
-        ></a
-      >
-      <div class="top-right">
-        <span id="session-state">未登录</span
-        ><button id="logout" class="quiet" hidden>退出</button>
-      </div>
-    </header>
-    <div class="layout">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <div class="page-glow page-glow-left" aria-hidden="true"></div>
+    <div class="page-glow page-glow-right" aria-hidden="true"></div>
+    <div class="page-grid" aria-hidden="true"></div>
+    <div class="app-shell">
       <aside class="sidebar">
-        <p class="eyebrow">工作空间</p>
-        <nav aria-label="主要导航">
-          <a href="/" data-page="materials">我的资料<span>01</span></a
-          ><a href="/connect" data-page="connect">添加与连接<span>02</span></a
-          ><a href="/activity" data-page="activity"
-            >处理与设置<span>03</span></a
-          >
-        </nav>
-        <div class="sidebar-note">
-          <span class="tiny-line"></span>
-          <p>资料留在你选择的位置。<br />AI 按需读取，可以回到来源。</p>
-          <p class="muted">
-            AI 接口默认只读。<br />处理须主人单独授权。
-          </p>
+        <div class="brand-block">
+          <a class="brand-heading" href="/">
+            <span class="brand-mark" aria-hidden="true">CC</span>
+            <div><p class="eyebrow">Collection Context</p><h1>收藏上下文</h1></div>
+          </a>
+          <p class="brand-copy">收藏过的教程、工具和灵感，<br />留给下一次需要的自己。</p>
         </div>
+        <nav class="nav-list" aria-label="主要导航">
+          <a class="nav-item" href="/" data-page="materials"><span class="nav-kicker">01</span><span>我的资料</span></a>
+          <a class="nav-item" href="/connect" data-page="connect"><span class="nav-kicker">02</span><span>添加与连接</span></a>
+          <a class="nav-item" href="/activity" data-page="activity"><span class="nav-kicker">03</span><span>处理与设置</span></a>
+        </nav>
+        <section class="sidebar-card">
+          <div class="section-mini-head">你的资料，你来决定</div>
+          <p>文件保存在本地，AI 按需读取。原文、转写与总结分别保留，随时可以回到来源。</p>
+          <p>同步不等于付费提取。AI 默认只读，添加和模型处理需要独立授权。</p>
+        </section>
+        <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span>LOCAL FIRST · 开发候选版</div>
       </aside>
-      <main>
+      <main id="main-content" class="main-panel">
+        <header class="hero-card card">
+          <div class="hero-content">
+            <div>
+              <p id="hero-eyebrow" class="eyebrow">你的个人收藏资料库</p>
+              <h2 id="hero-title">把收藏，留给下一次灵感。</h2>
+              <p id="hero-description" class="hero-copy">从喜欢和收藏中找到过去的教程。读原文、查转写、核对画面，让你的 AI 有据可答。</p>
+            </div>
+            <div class="hero-actions">
+              <div class="status-stack"><span id="session-state" class="status-pill status-pending">未登录</span><span class="status-hint">本地资料 · 自配模型 · 来源可追溯</span></div>
+              <div class="hero-button-row"><button id="logout" class="quiet" hidden>退出</button></div>
+            </div>
+          </div>
+          <div class="hero-metrics" aria-label="资料库实际概况">
+            <article class="metric-tile"><span class="metric-label">已保存资料</span><strong id="hero-count">—</strong><span class="metric-note">当前资料库中的可见条目</span></article>
+            <article class="metric-tile"><span class="metric-label">尚待音频转写</span><strong id="hero-pending">—</strong><span class="metric-note">没有音轨的图文不计入</span></article>
+            <article class="metric-tile"><span class="metric-label">已登记任务</span><strong id="hero-jobs">—</strong><span class="metric-note">登记数量，不代表执行成功</span></article>
+          </div>
+        </header>
         <section id="login-panel" class="login-card">
           <p class="eyebrow">只属于你的资料库</p>
           <h1>让收藏，<br />成为可引用的资料。</h1>
@@ -62,7 +77,7 @@
             <div class="heading">
               <div>
                 <p class="eyebrow">COLLECTIONS / 本地资料</p>
-                <h1>你留下的那些灵感。</h1>
+                <h1>我的资料</h1>
                 <p class="muted">
                   找到原文、转写和画面证据。收藏只是资料与兴趣线索。
                 </p>

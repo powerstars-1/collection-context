@@ -51,9 +51,20 @@ const page =
     : location.pathname === "/activity"
       ? "activity"
       : "materials";
+const pageCopy = {
+  materials: ["你的个人收藏资料库", "把收藏，留给下一次灵感。", "从喜欢和收藏中找到过去的教程。读原文、查转写、核对画面，让你的 AI 有据可答。"],
+  connect: ["添加与连接", "从你感兴趣的地方开始。", "添加一条作品，或连接喜欢、收藏夹与指定博主。同步范围由你选择，保存资料与模型提取分开。"],
+  activity: ["处理与设置", "让每一次处理，都有迹可循。", "查看任务、配置自己的模型，决定哪些内容自动处理。请求次数和缺失项如实显示，未知费用不会假装为零。"],
+};
+["hero-eyebrow", "hero-title", "hero-description"].forEach((id, index) => {
+  $(id).textContent = pageCopy[page][index];
+});
 document
   .querySelectorAll("nav a")
-  .forEach((a) => a.classList.toggle("active", a.dataset.page === page));
+  .forEach((a) => {
+    a.classList.toggle("active", a.dataset.page === page);
+    if (a.dataset.page === page) a.setAttribute("aria-current", "page");
+  });
 function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -134,6 +145,8 @@ function showLogin() {
   $("login-panel").hidden = false;
   $("logout").hidden = true;
   $("session-state").textContent = "未登录";
+  $("session-state").className = "status-pill status-pending";
+  ["hero-count", "hero-pending", "hero-jobs"].forEach((id) => { $(id).textContent = "—"; });
   $("items").replaceChildren();
   $("detail").replaceChildren();
 }
@@ -144,7 +157,10 @@ async function enter(session) {
   $("workspace").hidden = false;
   $("logout").hidden = false;
   $("session-state").textContent = "已连接本地资料库";
+  $("session-state").className = "status-pill status-success";
   $(page).hidden = false;
+  await loadHero();
+  if (csrf !== session.csrf_token) return;
   if (page === "materials") {
     resetDetail();
     await loadItems(false);
@@ -234,8 +250,10 @@ function renderItem(item) {
   [...new Set(item.relations.map((r) => r.kind))].forEach((kind) =>
     tags.append(el("span", labels[kind] || kind, "tag")),
   );
+  const top = el("span", undefined, "item-top");
+  top.append(tags, el("span", item.media_type === "image" ? "IMAGE NOTE" : "VIDEO", "item-kind"));
   button.append(
-    tags,
+    top,
     el("span", item.title || "未提供标题", "item-title"),
     el(
       "span",
@@ -243,6 +261,10 @@ function renderItem(item) {
       "item-meta",
     ),
   );
+  const bottom = el("span", undefined, "item-bottom");
+  const ready = Object.entries(item.artifact_states || {}).filter(([kind, state]) => kind !== "original" && state === "ready").map(([kind]) => artifactLabels[kind] || kind);
+  bottom.append(el("span", ready.length ? `已保存：${ready.join(" / ")}` : "原文已保存 · 提取待处理"));
+  button.append(bottom);
   if (item.snippet) button.append(el("span", item.snippet, "snippet"));
   button.addEventListener("click", () => showDetail(item));
   $("items").append(button);
@@ -346,6 +368,18 @@ async function loadRead(kind, append) {
   } catch (error) {
     if (selected === item && currentArtifact === kind && epoch === readEpoch)
       $("evidence-state").textContent = error.message;
+  }
+}
+async function loadHero() {
+  const session = csrf;
+  try {
+    const data = await api("/v1/collections/overview");
+    if (!session || csrf !== session) return;
+    $("hero-count").textContent = String(data.total_items);
+    $("hero-pending").textContent = String(data.audio_missing);
+    $("hero-jobs").textContent = String(Object.values(data.job_counts).reduce((sum, n) => sum + n, 0));
+  } catch (error) {
+    if (session && csrf === session) ["hero-count", "hero-pending", "hero-jobs"].forEach((id) => { $(id).textContent = "未知"; });
   }
 }
 async function loadOverview() {
