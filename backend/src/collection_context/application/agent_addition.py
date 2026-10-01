@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from collection_context.application.contracts import ContextError, canonical_bytes, envelope, valid_id
-from collection_context.workflows.addition import AdditionWorkflow
+
+if TYPE_CHECKING:
+    from collection_context.workflows.addition import AdditionWorkflow
 
 WRITE_TOOLS = frozenset({"add_collection", "get_job"})
 

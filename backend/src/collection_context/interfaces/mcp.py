@@ -16,7 +16,6 @@ from collection_context.application.gateway import ReadGateway
 from collection_context.application.service import ContextService
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.library.store import LibraryStore
-from collection_context.workflows.addition import AdditionWorkflow
 
 
 def build_server(gateway: ReadGateway, additions: AgentAdditionGateway | None = None) -> Any:
@@ -119,6 +118,9 @@ def main(argv: list[str] | None = None) -> int:
             registry = AccessRegistry(store)
             credential = registry.authenticate(os.environ.get("COLLECTION_CONTEXT_ACCESS_TOKEN"))
             registry.authorize_add(credential.principal)
+            # Read-only clients and rejected credentials must not load media/source execution.
+            from collection_context.workflows.addition import AdditionWorkflow
+
             additions = AgentAdditionGateway(
                 AdditionWorkflow(store, agent_authority=registry.authorize_add), credential.principal
             )
