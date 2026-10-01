@@ -69,8 +69,22 @@ function el(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
   if (className) node.className = className;
+  if (tag === "button" && !node.classList.contains("tiny-button")) {
+    node.classList.add("button");
+    if (!["secondary", "tertiary", "ghost"].some((name) => node.classList.contains(name))) node.classList.add("primary");
+  }
   return node;
 }
+function fieldComponent(label, input) {
+  label.classList.add("field");
+  const text = label.textContent;
+  label.replaceChildren(el("span", text, "field-label"), input);
+  return label;
+}
+document.querySelectorAll("button:not(.tiny-button)").forEach((button) => {
+  button.classList.add("button");
+  if (!["primary", "secondary", "tertiary", "ghost"].some((name) => button.classList.contains(name))) button.classList.add("primary");
+});
 async function api(path, value) {
   const response = await fetch(path, {
     method: value === undefined ? "GET" : "POST",
@@ -97,13 +111,14 @@ async function api(path, value) {
   return result.data;
 }
 function resetDetail() {
-  const empty = el("div", undefined, "empty");
+  const empty = el("div", undefined, "empty-state");
   empty.append(
-    el("span", "↗", "empty-mark"),
-    el("h2", "选择一份资料"),
-    el("p", "原文与提取分开查看。缺失或过期的内容会明确说明。"),
+    el("p", "还没有详情结果。"),
+    el("span", "在资料卡片里点击“查看详情”，可分别阅读原文、转写和画面。"),
   );
+  $("detail").classList.add("empty-shell");
   $("detail").replaceChildren(empty);
+  $("detail-result-summary").textContent = "尚未选择资料";
 }
 function showLogin() {
   linkEpoch++;
@@ -149,6 +164,7 @@ function showLogin() {
   ["hero-count", "hero-pending", "hero-jobs"].forEach((id) => { $(id).textContent = "—"; });
   $("items").replaceChildren();
   $("detail").replaceChildren();
+  $("json-output").textContent = '{"message":"请登录本机资料库。"}';
 }
 async function enter(session) {
   csrf = session.csrf_token;
@@ -231,43 +247,79 @@ async function loadItems(append) {
       data.total_items ?? data.total_matches,
     );
     data.items.forEach(renderItem);
+    $("response-state").textContent = query ? "搜索结果已更新" : "资料列表已更新";
+    $("response-banner").classList.remove("is-error");
+    $("response-banner").classList.add("is-success");
+    $("json-output").textContent = JSON.stringify(data, null, 2);
     $("more-items").hidden = !listing || listing.next_offset === null;
     $("search-message").textContent = data.items.length
       ? query
         ? "关键词命中；继续读原文或画面核对细节。"
         : "按首次发现时间排序；这不是实际点赞时间。"
       : "当前范围没有资料。尝试换个词或来源筛选。";
-    if (!data.items.length) $("items").append(el("p", "没有匹配资料", "empty"));
+    if (!data.items.length) {
+      const empty = el("div", undefined, "empty-state");
+      empty.append(el("p", "没有匹配资料"), el("span", "更换关键词或来源，或者查看全部资料。"));
+      $("items").append(empty);
+    }
   } catch (error) {
-    if (epoch === searchEpoch) $("search-message").textContent = error.message;
+    if (epoch === searchEpoch) {
+      $("search-message").textContent = error.message;
+      $("response-banner").classList.remove("is-success");
+      $("response-banner").classList.add("is-error");
+      $("response-state").textContent = "读取失败";
+    }
   }
 }
-function renderItem(item) {
-  const button = el("button", undefined, "item");
+function renderStat(label, value) {
+  const stat = el("div", undefined, "stat-item");
+  stat.append(el("span", label, "stat-label"), el("span", String(value ?? "未知"), "stat-value"));
+  return stat;
+}
+function sourceLink(item, text) {
+  if (!/^https:\/\/www\.douyin\.com\/(video|note)\/\d+$/.test(item.source_url)) return null;
+  const link = el("a", text, "tiny-button");
+  link.href = item.source_url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+function copyLinkButton(item) {
+  const button = el("button", "复制链接", "tiny-button");
   button.type = "button";
-  button.dataset.ref = item.material_ref;
-  const tags = el("span");
-  [...new Set(item.relations.map((r) => r.kind))].forEach((kind) =>
-    tags.append(el("span", labels[kind] || kind, "tag")),
-  );
-  const top = el("span", undefined, "item-top");
-  top.append(tags, el("span", item.media_type === "image" ? "IMAGE NOTE" : "VIDEO", "item-kind"));
-  button.append(
-    top,
-    el("span", item.title || "未提供标题", "item-title"),
-    el(
-      "span",
-      `${item.author || "作者未知"} · ${item.media_type === "image" ? "图文" : "视频"}`,
-      "item-meta",
-    ),
-  );
-  const bottom = el("span", undefined, "item-bottom");
+  button.disabled = !sourceLink(item, "");
+  button.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(item.source_url); button.textContent = "已复制"; }
+    catch { button.textContent = "复制失败，请打开来源"; }
+  });
+  return button;
+}
+function renderItem(item) {
+  const card = el("article", undefined, "note-card item");
+  card.dataset.ref = item.material_ref;
+  const head = el("div", undefined, "note-head");
+  const title = el("div");
+  const metadata = el("ul", undefined, "note-meta");
+  metadata.append(el("li", "作者：" + (item.author || "未知")), el("li", "引用：" + item.material_ref));
+  title.append(el("h5", item.title || "未提供标题", "note-title"), metadata);
+  const mediaLabel = item.media_type === "image" ? "图文" : item.media_type === "video" ? "视频" : "资料";
+  head.append(title, el("span", mediaLabel, "type-pill"));
   const ready = Object.entries(item.artifact_states || {}).filter(([kind, state]) => kind !== "original" && state === "ready").map(([kind]) => artifactLabels[kind] || kind);
-  bottom.append(el("span", ready.length ? `已保存：${ready.join(" / ")}` : "原文已保存 · 提取待处理"));
-  button.append(bottom);
-  if (item.snippet) button.append(el("span", item.snippet, "snippet"));
-  button.addEventListener("click", () => showDetail(item));
-  $("items").append(button);
+  const processingLabel = item.artifact_states
+    ? (ready.length ? `已保存：${ready.join(" / ")}` : "原文已保存 · 提取待处理")
+    : "检索已命中 · 处理状态见详情";
+  const stats = el("div", undefined, "stat-grid");
+  stats.append(renderStat("来源关系", [...new Set(item.relations.map((r) => labels[r.kind] || r.kind))].join(" / ")), renderStat("资料类型", mediaLabel), renderStat("处理状态", processingLabel));
+  const actions = el("div", undefined, "note-actions");
+  const view = el("button", "查看详情", "tiny-button js-parse-detail");
+  view.type = "button";
+  view.addEventListener("click", () => showDetail(item));
+  const source = sourceLink(item, "打开来源");
+  if (source) actions.append(source);
+  actions.append(view, copyLinkButton(item));
+  card.append(head, stats, actions);
+  if (item.snippet) card.append(el("p", item.snippet, "detail-desc"));
+  $("items").append(card);
 }
 async function showDetail(item) {
   const epoch = ++detailEpoch;
@@ -280,32 +332,31 @@ async function showDetail(item) {
       b.classList.toggle("selected", b.dataset.ref === item.material_ref),
     );
   const detail = $("detail");
-  detail.replaceChildren(
-    el("p", "SOURCE / 来源证据", "eyebrow"),
-    el("h2", item.title || "未提供标题"),
-  );
-  detail.append(
-    el("p", `${item.author || "作者未知"} · 内容不代表你的观点`, "detail-meta"),
-  );
-  if (/^https:\/\/www\.douyin\.com\/(video|note)\/\d+$/.test(item.source_url)) {
-    const link = el("a", "查看抖音来源 ↗", "source-link");
-    link.href = item.source_url;
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    detail.append(link);
-  }
-  const tabs = el("div", undefined, "tabs");
+  detail.classList.remove("empty-shell");
+  detail.replaceChildren(el("h4", item.title || "未提供标题", "detail-title"));
+  const metadata = el("ul", undefined, "detail-meta");
+  metadata.append(el("li", "作者：" + (item.author || "未知")), el("li", "内容不代表你的观点"));
+  detail.append(metadata);
+  const actions = el("div", undefined, "note-actions");
+  const source = sourceLink(item, "打开来源");
+  if (source) actions.append(source);
+  actions.append(copyLinkButton(item));
+  const relations = el("div", undefined, "chip-row");
+  [...new Set(item.relations.map((r) => r.kind))].forEach((kind) => relations.append(el("span", labels[kind] || kind, "tag-chip")));
+  detail.append(actions, relations);
+  const tabs = el("div", undefined, "note-actions tabs");
   Object.entries(artifactLabels).forEach(([kind, label]) => {
-    const button = el("button", label);
+    const button = el("button", label, "tiny-button");
     button.dataset.artifact = kind;
     button.type = "button";
     button.addEventListener("click", () => loadRead(kind, false));
     tabs.append(button);
   });
-  detail.append(tabs, el("p", "正在读取证据…", "detail-meta"));
+  detail.append(tabs, el("p", "正在读取证据…", "detail-desc artifact-gaps"));
+  $("detail-result-summary").textContent = "原文与提取分别读取";
   const state = el("p");
   state.id = "evidence-state";
-  const content = el("pre", "", "evidence");
+  const content = el("pre", "", "detail-desc evidence");
   content.id = "evidence-text";
   const more = el("button", "继续读取", "secondary");
   more.id = "more-read";
@@ -317,7 +368,7 @@ async function showDetail(item) {
       `/v1/collections/${encodeURIComponent(item.material_ref)}/status`,
     );
     if (selected !== item || epoch !== detailEpoch) return;
-    detail.querySelector(".tabs + .detail-meta").textContent = Object.entries(
+    detail.querySelector(".artifact-gaps").textContent = Object.entries(
       status.artifacts,
     )
       .filter(([, a]) => a.state !== "ready")
@@ -361,6 +412,7 @@ async function loadRead(kind, append) {
     if (selected !== item || currentArtifact !== kind || epoch !== readEpoch)
       return;
     readPage = data;
+    $("json-output").textContent = JSON.stringify(data, null, 2);
     $("evidence-text").textContent += data.text;
     $("evidence-state").textContent =
       `${stateLabels[data.state] || data.state} · ${data.total_chars} 字符${data.warnings.length ? " · " + data.warnings.join(" ") : ""}`;
@@ -385,7 +437,7 @@ async function loadHero() {
 async function loadOverview() {
   try {
     const data = await api("/v1/collections/overview");
-    const metrics = el("div", undefined, "metrics");
+    const metrics = el("div", undefined, "hero-metrics");
     for (const [value, label] of [
       [data.total_items, "资料条目"],
       [data.audio_missing, "视频尚无转写"],
@@ -394,8 +446,8 @@ async function loadOverview() {
         "已登记任务",
       ],
     ]) {
-      const card = el("div", undefined, "metric");
-      card.append(el("strong", String(value)), el("span", label));
+      const card = el("article", undefined, "metric-tile");
+      card.append(el("span", label, "metric-label"), el("strong", String(value)));
       metrics.append(card);
     }
     $("overview").replaceChildren(metrics);
@@ -434,7 +486,7 @@ function renderModels(data) {
     const section = el("article", undefined, "model-card");
     section.dataset.role = role;
     section.append(el("h3", names[role]), el("p", value.configured ? "已登记 · 尚未验证模型能力" : "尚未配置", "muted"));
-    const form = el("form");
+    const form = el("form", undefined, "stack-form");
     const fields = el("fieldset");
     fields.disabled = !data.configuration_enabled;
     function field(name, label, type, content) {
@@ -445,7 +497,7 @@ function renderModels(data) {
       input.id = id;
       input.type = type;
       input.value = content ?? "";
-      fields.append(labelNode, input);
+      fields.append(fieldComponent(labelNode, input));
       return input;
     }
     const config = value.profile || {};
@@ -465,24 +517,30 @@ function renderModels(data) {
       const option = el("option", label); option.value = name; protocol.append(option);
     }
     protocol.value = config.protocol || (role === "audio" ? "chat_audio" : "chat");
-    fields.append(protocolLabel, protocol);
+    fields.append(fieldComponent(protocolLabel, protocol));
     const key = field("key", value.configured ? "API Key（留空保留此角色原密钥）" : "API Key", "password", "");
     key.autocomplete = "off";
     key.maxLength = 4096;
     key.required = !value.configured;
+    for (const pair of [[url, model], [protocol, key]]) {
+      const grid = el("div", undefined, "field-grid");
+      const first = pair[0].parentElement;
+      fields.insertBefore(grid, first);
+      pair.forEach((input) => grid.append(input.parentElement));
+    }
     const advanced = el("details");
     advanced.append(el("summary", "超时与可选参数"));
     const timeout = field("timeout", "超时（秒，1～600）", "number", config.timeout ?? 120);
     timeout.min = "1"; timeout.max = "600"; timeout.required = true;
     const timeoutLabel = fields.querySelector(`label[for='${timeout.id}']`);
-    advanced.append(timeoutLabel, timeout);
+    advanced.append(timeoutLabel);
     const parameters = el("textarea");
     parameters.id = `model-${role}-parameters`;
     parameters.maxLength = 8192;
     parameters.value = JSON.stringify(config.parameters || {}, null, 2);
     const parametersLabel = el("label", "参数 JSON（仅温度、输出上限、思考参数）");
     parametersLabel.htmlFor = parameters.id;
-    advanced.append(parametersLabel, parameters);
+    advanced.append(fieldComponent(parametersLabel, parameters));
     fields.append(advanced);
     const confirmation = el("input");
     confirmation.type = "checkbox";
@@ -918,6 +976,15 @@ $("prepared-more").addEventListener("click", async () => { preparedOffset = Numb
 $("search-form").addEventListener("submit", (event) => {
   event.preventDefault();
   loadItems(false);
+});
+$("reset-search").addEventListener("click", () => {
+  $("query").value = "";
+  $("source-filter").value = "";
+  loadItems(false);
+});
+$("copy-json").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("json-output").textContent); $("copy-json").textContent = "已复制 JSON"; }
+  catch { $("copy-json").textContent = "复制失败，可手动选择文本"; }
 });
 $("source-filter").addEventListener("change", () => loadItems(false));
 $("more-items").addEventListener("click", () => loadItems(true));

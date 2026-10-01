@@ -16,11 +16,12 @@
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand-block">
-          <a class="brand-heading" href="/">
-            <span class="brand-mark" aria-hidden="true">CC</span>
-            <div><p class="eyebrow">Collection Context</p><h1>收藏上下文</h1></div>
-          </a>
-          <p class="brand-copy">收藏过的教程、工具和灵感，<br />留给下一次需要的自己。</p>
+          <div class="brand-mark" aria-hidden="true">CC</div>
+          <div>
+            <p class="eyebrow">Collection Context</p>
+            <h1>收藏上下文</h1>
+            <p class="brand-copy">收藏过的教程、工具和灵感，留给下一次需要的自己。</p>
+          </div>
         </div>
         <nav class="nav-list" aria-label="主要导航">
           <a class="nav-item" href="/" data-page="materials"><span class="nav-kicker">01</span><span>我的资料</span></a>
@@ -28,11 +29,13 @@
           <a class="nav-item" href="/activity" data-page="activity"><span class="nav-kicker">03</span><span>处理与设置</span></a>
         </nav>
         <section class="sidebar-card">
-          <div class="section-mini-head">你的资料，你来决定</div>
-          <p>文件保存在本地，AI 按需读取。原文、转写与总结分别保留，随时可以回到来源。</p>
-          <p>同步不等于付费提取。AI 默认只读，添加和模型处理需要独立授权。</p>
+          <div class="section-mini-head"><span class="dot dot-live"></span><span>使用提醒</span></div>
+          <ul class="compact-list">
+            <li>文件保存在本地。原文、转写与总结分别保留，可以回到来源。</li>
+            <li>同步与模型提取分别授权，API Key 不存入浏览器。</li>
+            <li>AI 默认只读。添加和重新处理须另行授权。</li>
+          </ul>
         </section>
-        <div class="sidebar-foot"><span class="dot" aria-hidden="true"></span>LOCAL FIRST · 开发候选版</div>
       </aside>
       <main id="main-content" class="main-panel">
         <header class="hero-card card">
@@ -44,7 +47,7 @@
             </div>
             <div class="hero-actions">
               <div class="status-stack"><span id="session-state" class="status-pill status-pending">未登录</span><span class="status-hint">本地资料 · 自配模型 · 来源可追溯</span></div>
-              <div class="hero-button-row"><button id="logout" class="quiet" hidden>退出</button></div>
+              <div class="hero-button-row"><button id="logout" class="button secondary" hidden>退出</button></div>
             </div>
           </div>
           <div class="hero-metrics" aria-label="资料库实际概况">
@@ -53,76 +56,65 @@
             <article class="metric-tile"><span class="metric-label">已登记任务</span><strong id="hero-jobs">—</strong><span class="metric-note">登记数量，不代表执行成功</span></article>
           </div>
         </header>
-        <section id="login-panel" class="login-card">
-          <p class="eyebrow">只属于你的资料库</p>
-          <h1>让收藏，<br />成为可引用的资料。</h1>
+        <section id="login-panel" class="card session-card">
+          <div class="section-head"><div><p class="section-eyebrow">Session</p><h3>连接本机资料库</h3></div><span class="section-tip">使用产品访问口令</span></div>
           <p class="muted">
             使用首次启动时生成的产品访问口令登录。<br />这里不接收抖音密码，也不接收模型
             API Key。
           </p>
-          <form id="login-form">
-            <label for="access-token">产品访问口令</label
-            ><input
+          <form id="login-form" class="stack-form">
+            <label class="field" for="access-token"><span class="field-label">产品访问口令</span><input
               id="access-token"
               type="password"
               autocomplete="off"
               required
               placeholder="输入本机生成的访问口令"
-            /><button type="submit">进入资料库</button>
+            /></label><div class="button-row"><button type="submit" class="button primary">进入资料库</button></div>
           </form>
           <p id="login-error" class="error" role="alert"></p>
         </section>
         <div id="workspace" hidden>
-          <section id="materials" class="page" hidden>
-            <div class="heading">
-              <div>
-                <p class="eyebrow">COLLECTIONS / 本地资料</p>
-                <h1>我的资料</h1>
-                <p class="muted">
-                  找到原文、转写和画面证据。收藏只是资料与兴趣线索。
-                </p>
-              </div>
-              <span id="material-count" class="count">—</span>
-            </div>
-            <form id="search-form" class="searchbar">
-              <label class="sr-only" for="query">搜索资料</label
-              ><input
-                id="query"
-                placeholder="搜索工具、关键词或教程 · 空格分隔词"
-              /><label class="sr-only" for="source-filter">来源</label
-              ><select id="source-filter">
+          <section id="materials" class="page workspace-grid" hidden>
+            <section class="card form-card session-card">
+              <div class="section-head"><div><p class="section-eyebrow">Search</p><h3>检索本地资料</h3></div><span class="section-tip">查已有资料，不访问平台或请求模型</span></div>
+              <form id="search-form" class="stack-form">
+                <div class="field-grid">
+
+                  <label class="field" for="query"><span class="field-label">关键词</span><input id="query" placeholder="工具、关键词或教程 · 空格分隔词" /></label>
+                  <label class="field" for="source-filter"><span class="field-label">来源</span><select id="source-filter">
                 <option value="">所有来源</option>
                 <option value="liked">喜欢</option>
                 <option value="saved">收藏</option>
                 <option value="collection">收藏夹</option>
                 <option value="creator">博主作品</option>
-                <option value="link">单链接</option></select
-              ><button type="submit">查找</button>
-            </form>
-            <p
-              id="search-message"
-              class="muted"
-              role="status"
-              aria-live="polite"
-            ></p>
-            <div class="material-grid">
-              <section class="material-list" aria-label="资料列表">
-                <div id="items"></div>
-                <button id="more-items" class="secondary" hidden>
-                  继续查看
-                </button>
-              </section>
-              <section id="detail" class="detail" aria-label="资料内容">
-                <div class="empty">
-                  <span class="empty-mark">↗</span>
-                  <h2>选择一份资料</h2>
-                  <p>原文与提取分开查看。<br />缺失或过期的内容会明确说明。</p>
+                <option value="link">单链接</option></select></label>
                 </div>
-              </section>
-            </div>
+                <div class="button-row"><button type="submit" class="button primary">开始搜索</button><button type="button" id="reset-search" class="button tertiary">查看全部资料</button></div>
+              </form>
+            </section>
+            <section class="card results-card">
+              <div class="section-head"><div><p class="section-eyebrow">Results</p><h3>结果浏览台</h3></div><span id="response-state" class="section-tip">读取已有资料</span></div>
+              <div class="response-banner" id="response-banner"><strong>资料与证据</strong><span id="search-message" role="status" aria-live="polite">可以检索关键词，或在资料卡片里查看详情。</span></div>
+              <div class="results-layout">
+                <section class="result-column" aria-label="资料列表">
+                  <div class="column-head"><h4>资料列表</h4><span id="material-count" class="column-meta">—</span></div>
+                  <div id="items" class="note-list"></div>
+                  <button id="more-items" class="button secondary" hidden>继续查看</button>
+                </section>
+                <section class="result-column detail-column" aria-label="资料内容">
+                  <div class="column-head"><h4>资料详情</h4><span id="detail-result-summary" class="column-meta">尚未选择资料</span></div>
+                  <div id="detail" class="detail-shell empty-shell"><div class="empty-state"><p>还没有详情结果。</p><span>在资料卡片里点击“查看详情”，可分别阅读原文、转写和画面。</span></div></div>
+                </section>
+              </div>
+            </section>
+            <section class="card json-card">
+              <div class="section-head"><div><p class="section-eyebrow">JSON / Context</p><h3>当前资料响应</h3></div><button type="button" id="copy-json" class="button secondary">复制当前 JSON</button></div>
+              <div class="sync-strip"><span class="sync-step">1. 检索已有资料</span><span class="sync-step">2. 读取原文与提取证据</span><span class="sync-step">3. 让你的 AI 按需引用</span></div>
+              <pre id="json-output" class="json-output">{"message":"选择资料后，这里显示当前读取响应；不包含产品口令或模型密钥。"}</pre>
+            </section>
           </section>
           <section id="connect" class="page" hidden>
-            <div class="heading">
+            <div class="section-head">
               <div>
                 <p class="eyebrow">SOURCES / 连接资料</p>
                 <h1>从你选择的来源开始。</h1>
@@ -137,10 +129,10 @@
             <section class="card management-section" aria-label="添加单条作品">
               <h2>添加一条抖音作品</h2>
               <p class="muted">粘贴完整作品链接、短链接或含一个链接的分享文字。这里只登记一条，不扩大到博主或历史列表。</p>
-              <form id="link-form"><fieldset id="link-fields" disabled>
-                <label for="link-url">作品链接或分享文字</label><textarea id="link-url" rows="3" maxlength="8192" required></textarea>
-                <label class="check"><input id="link-download" type="checkbox">下载并准备原媒体；不请求模型</label>
-                <label class="check"><input id="link-confirmed" type="checkbox">确认仅访问此作品及上述下载范围</label>
+              <form id="link-form" class="stack-form"><fieldset id="link-fields" disabled>
+                <label class="field" for="link-url"><span class="field-label">作品链接或分享文字</span><textarea id="link-url" rows="3" maxlength="8192" required></textarea></label>
+                <label class="field field-toggle"><span class="checkbox-row"><input id="link-download" type="checkbox">下载并准备原媒体；不请求模型</span></label>
+                <label class="field field-toggle"><span class="checkbox-row"><input id="link-confirmed" type="checkbox">确认仅访问此作品及上述下载范围</span></label>
                 <button type="submit">登记单条任务</button>
               </fieldset></form>
               <p class="muted">后台须单独允许来源访问。此确认不启用收费提取；若已另行开启新增自动提取，仍受原有授权和调用上限约束。</p>
@@ -149,11 +141,11 @@
               <button id="link-refresh" type="button" class="secondary" disabled>刷新本条任务</button>
             </section>
             <section class="card management-section" aria-label="独立连接证明">
-              <div class="heading"><h2>本人账号与收藏夹</h2><button id="refresh-connection" class="secondary">刷新本地连接</button></div>
+              <div class="section-head"><h2>本人账号与收藏夹</h2><button id="refresh-connection" class="secondary">刷新本地连接</button></div>
               <p id="connection-state" class="notice" role="status"></p>
               <p class="muted">刷新只读取本地证明。主动连接才访问平台；有桌面时登录窗口出现在后台所在电脑，无桌面只验证已有独立登录。证明15分钟后过期，保存范围不代表同步或授权模型。收藏夹兼容性仍待真实账号验证。</p>
               <fieldset id="connection-actions" disabled>
-                <label class="check"><input id="connection-access-confirmed" type="checkbox">允许本次独立浏览器访问本人账号页面；不获取作品、不调用模型</label>
+                <label class="field field-toggle"><span class="checkbox-row"><input id="connection-access-confirmed" type="checkbox">允许本次独立浏览器访问本人账号页面；不获取作品、不调用模型</span></label>
                 <div class="actions"><button id="connection-login" type="button">打开独立登录</button><button id="connection-check" type="button" class="secondary">验证已有登录</button><button id="connection-folders" type="button" class="secondary">发现收藏夹</button></div>
               </fieldset>
               <p id="connection-run-state" class="muted" role="status" aria-live="polite">后台连接入口尚未读取。</p>
@@ -162,48 +154,46 @@
             </section>
             <div class="source-grid">
               <article class="card">
-                <span class="tag">本人来源</span>
+                <span class="tag-chip">本人来源</span>
                 <h2>喜欢与收藏</h2>
                 <p>保留兴趣线索。未知的喜欢时间，不会冒充最近点赞。</p>
-                <form id="self-source-form"><fieldset id="self-source-fields" disabled>
-                  <label for="self-source-kind">选择本人列表</label><select id="self-source-kind"><option value="saved">收藏</option><option value="liked">喜欢</option></select>
-                  <label for="self-source-limit">每批最多作品数</label><input id="self-source-limit" type="number" min="1" max="20" value="5" required />
-                  <label class="check"><input id="self-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</label>
-                  <label class="check"><input id="self-source-confirmed" type="checkbox" required />确认本人列表；本次仅登记范围</label>
+                <form id="self-source-form" class="stack-form"><fieldset id="self-source-fields" disabled>
+                  <label class="field" for="self-source-kind"><span class="field-label">选择本人列表</span><select id="self-source-kind"><option value="saved">收藏</option><option value="liked">喜欢</option></select></label>
+                  <label class="field" for="self-source-limit"><span class="field-label">每批最多作品数</span><input id="self-source-limit" type="number" min="1" max="20" value="5" required /></label>
+                  <label class="field field-toggle"><span class="checkbox-row"><input id="self-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</span></label>
+                  <label class="field field-toggle"><span class="checkbox-row"><input id="self-source-confirmed" type="checkbox" required />确认本人列表；本次仅登记范围</span></label>
                   <button type="submit">保存本人范围</button>
                 </fieldset></form>
               </article>
               <article class="card">
-                <span class="tag">按范围选择</span>
+                <span class="tag-chip">按范围选择</span>
                 <h2>指定收藏夹</h2>
                 <p>只同步你选择的收藏夹。同一作品的其他来源仍会保留。</p>
-                <form id="folder-source-form"><fieldset id="folder-source-fields" disabled>
-                  <label for="folder-source-id">已观察收藏夹</label><select id="folder-source-id" required></select>
+                <form id="folder-source-form" class="stack-form"><fieldset id="folder-source-fields" disabled>
+                  <label class="field" for="folder-source-id"><span class="field-label">已观察收藏夹</span><select id="folder-source-id" required></select></label>
                   <p id="folder-coverage" class="muted"></p>
-                  <label for="folder-source-limit">每批最多作品数</label><input id="folder-source-limit" type="number" min="1" max="20" value="5" required />
-                  <label class="check"><input id="folder-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</label>
-                  <label class="check"><input id="folder-source-confirmed" type="checkbox" required />确认此收藏夹；本次仅登记范围</label>
+                  <label class="field" for="folder-source-limit"><span class="field-label">每批最多作品数</span><input id="folder-source-limit" type="number" min="1" max="20" value="5" required /></label>
+                  <label class="field field-toggle"><span class="checkbox-row"><input id="folder-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</span></label>
+                  <label class="field field-toggle"><span class="checkbox-row"><input id="folder-source-confirmed" type="checkbox" required />确认此收藏夹；本次仅登记范围</span></label>
                   <button type="submit">保存收藏夹范围</button>
                 </fieldset></form>
               </article>
               <article class="card">
-                <span class="tag">资料来源</span>
+                <span class="tag-chip">资料来源</span>
                 <h2>博主已发布作品</h2>
                 <p>登记完整博主主页，只收集已发布作品。首次建议5条；保存范围不会立即访问抖音。</p>
-                <form id="creator-form">
+                <form id="creator-form" class="stack-form">
                   <fieldset id="creator-fields" disabled>
-                    <label for="creator-url">完整抖音博主主页</label>
-                    <input id="creator-url" type="url" required maxlength="8192" placeholder="https://www.douyin.com/user/…" />
-                    <label for="creator-limit">每批最多作品数</label>
-                    <input id="creator-limit" type="number" min="1" max="20" value="5" required />
-                    <label class="check"><input id="creator-download" type="checkbox" />同步时下载附件并准备音轨与画面（不调用模型）</label>
+                    <label class="field" for="creator-url"><span class="field-label">完整抖音博主主页</span><input id="creator-url" type="url" required maxlength="8192" placeholder="https://www.douyin.com/user/…" /></label>
+                    <label class="field" for="creator-limit"><span class="field-label">每批最多作品数</span><input id="creator-limit" type="number" min="1" max="20" value="5" required /></label>
+                    <label class="field field-toggle"><span class="checkbox-row"><input id="creator-download" type="checkbox" />同步时下载附件并准备音轨与画面（不调用模型）</span></label>
                     <button type="submit">保存博主范围</button>
                   </fieldset>
                 </form>
               </article>
             </div>
             <section class="card management-section" aria-label="同步范围">
-              <div class="heading"><h2>已登记同步范围</h2><button id="refresh-sources" class="secondary">刷新范围</button></div>
+              <div class="section-head"><h2>已登记同步范围</h2><button id="refresh-sources" class="secondary">刷新范围</button></div>
               <p id="source-state" class="muted" role="status"></p>
               <p class="muted">每轮观察最新指定数量，不代表全历史同步。关闭定时不会取消手动批次；已经开始的访问可能继续，暂停在检查点生效。同步与收费提取开关独立。</p>
               <p id="source-feedback" class="error" role="status" aria-live="polite"></p>
@@ -212,7 +202,7 @@
             </section>
           </section>
           <section id="activity" class="page" hidden>
-            <div class="heading">
+            <div class="section-head">
               <div>
                 <p class="eyebrow">PROCESSING / 处理与设置</p>
                 <h1>知道资料走到了哪一步。</h1>
@@ -226,20 +216,17 @@
               <article class="card">
                 <h2>音频、视觉、总结</h2>
                 <p>云模型由你提供。三个角色分别配置，允许复用兼容模型。</p>
-                <span class="tag">下方分别配置 · 保存不请求模型</span>
+                <span class="tag-chip">下方分别配置 · 保存不请求模型</span>
               </article>
               <article class="card">
                 <h2>自动运行</h2>
                 <p id="auto-state">加载状态…</p>
-                <form id="auto-form">
+                <form id="auto-form" class="stack-form">
                   <fieldset id="auto-fields" disabled>
-                    <label for="auto-enabled">新增资料自动提取</label>
-                    <select id="auto-enabled"><option value="no">关闭</option><option value="yes">开启</option></select>
-                    <label for="auto-calls">每条最多云请求次数</label>
-                    <input id="auto-calls" type="number" min="0" max="1000" value="2" required />
-                    <label for="auto-tasks">本次最多新增任务</label>
-                    <input id="auto-tasks" type="number" min="1" max="1000" value="5" required />
-                    <label class="check"><input id="auto-fee" type="checkbox" />我确认上传媒体及此调用上限；金额未知</label>
+                    <label class="field" for="auto-enabled"><span class="field-label">新增资料自动提取</span><select id="auto-enabled"><option value="no">关闭</option><option value="yes">开启</option></select></label>
+                    <label class="field" for="auto-calls"><span class="field-label">每条最多云请求次数</span><input id="auto-calls" type="number" min="0" max="1000" value="2" required /></label>
+                    <label class="field" for="auto-tasks"><span class="field-label">本次最多新增任务</span><input id="auto-tasks" type="number" min="1" max="1000" value="5" required /></label>
+                    <label class="field field-toggle"><span class="checkbox-row"><input id="auto-fee" type="checkbox" />我确认上传媒体及此调用上限；金额未知</span></label>
                     <button type="submit">保存自动规则</button>
                   </fieldset>
                 </form>
@@ -249,11 +236,11 @@
                 <p>
                   命令行、MCP 与认证 HTTP 共用读库能力，默认不授予处理权限。
                 </p>
-                <span class="tag">搜索 · 读取 · 状态</span>
+                <span class="tag-chip">搜索 · 读取 · 状态</span>
               </article>
             </div>
             <section class="card management-section" aria-label="模型配置">
-              <div class="heading"><h2>模型与接口</h2><button id="refresh-models" class="secondary">刷新配置</button></div>
+              <div class="section-head"><h2>模型与接口</h2><button id="refresh-models" class="secondary">刷新配置</button></div>
               <p id="model-state" class="notice" role="status"></p>
               <p class="muted">接口与识别模型由你提供。保存只登记配置，不代表模型能力或密钥已验证；执行须另行授权，可能上传媒体并计费。修改默认值不改变已有任务的固定配置。刷新、退出或提交后会清空密钥输入，不回显已保存密钥。</p>
               <p id="model-feedback" class="error" role="status" aria-live="polite"></p>
@@ -262,20 +249,19 @@
             <section class="card management-section" aria-label="历史补处理">
               <h2>选择历史资料</h2>
               <p class="muted">仅列出已准备媒体的资料，每批最多20条。提交只登记任务，须另行授权后台执行器；可能复用成功阶段，未知费用不会自动重试。</p>
-              <form id="history-form">
+              <form id="history-form" class="stack-form">
                 <fieldset id="history-fields" disabled>
                   <div id="prepared-items"></div>
-                  <label for="history-calls">每条最多云请求次数</label>
-                  <input id="history-calls" type="number" min="0" max="1000" value="2" required />
+                  <label class="field" for="history-calls"><span class="field-label">每条最多云请求次数</span><input id="history-calls" type="number" min="0" max="1000" value="2" required /></label>
                   <p id="history-budget" class="muted"></p>
-                  <label class="check"><input id="history-fee" type="checkbox" required />确认所选媒体上传及调用上限；金额未知</label>
+                  <label class="field field-toggle"><span class="checkbox-row"><input id="history-fee" type="checkbox" required />确认所选媒体上传及调用上限；金额未知</span></label>
                   <button type="submit">提交所选历史批次</button>
                 </fieldset>
               </form>
               <button id="prepared-more" class="secondary" hidden>下一页历史资料</button>
             </section>
             <section class="card management-section" aria-label="任务状态">
-              <div class="heading"><h2>已登记任务</h2><button id="refresh-tasks" class="secondary">刷新状态</button></div>
+              <div class="section-head"><h2>已登记任务</h2><button id="refresh-tasks" class="secondary">刷新状态</button></div>
               <p id="worker-state" class="notice" role="status"></p>
               <p class="muted">在线状态是刷新时的内核所有权快照，不能证明处理进度或识别成功；离开页面或长时间未刷新后需重新确认。取消只停止后续阶段，已发出请求可能继续计费。</p>
               <div id="task-list"></div>
