@@ -1,0 +1,48 @@
+[project]
+name = "content-agent-backend"
+version = "0.1.0"
+description = "Local Agent-first CLI capability layer for AI content operations."
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.33,<3",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+content-context = "app.cli.context:main"
+content-agent = "app.cli.main:main"
+content-context-mcp = "app.cli.context_mcp:main"
+
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
+[tool.setuptools.packages.find]
+where = [".", "src"]
+include = ["app*", "collection_context*"]
+
+[tool.setuptools.package-data]
+app = ["samples/*.md", "templates/*.md", "prompts/*.md", "web/templates/*.html", "web/static/*", "tools/*.swift", "adapters/scripts/*"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+warn_unused_ignores = true

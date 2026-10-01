@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>收藏上下文 · 开发预览</title>
+    <link rel="stylesheet" href="/assets/app.css" />
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/"
+        ><span class="brand-mark">藏</span>收藏上下文<span class="dev"
+          >开发预览</span
+        ></a
+      >
+      <div class="top-right">
+        <span id="session-state">未登录</span
+        ><button id="logout" class="quiet" hidden>退出</button>
+      </div>
+    </header>
+    <div class="layout">
+      <aside class="sidebar">
+        <p class="eyebrow">工作空间</p>
+        <nav aria-label="主要导航">
+          <a href="/" data-page="materials">我的资料<span>01</span></a
+          ><a href="/connect" data-page="connect">添加与连接<span>02</span></a
+          ><a href="/activity" data-page="activity"
+            >处理与设置<span>03</span></a
+          >
+        </nav>
+        <div class="sidebar-note">
+          <span class="tiny-line"></span>
+          <p>资料留在你选择的位置。<br />AI 按需读取，可以回到来源。</p>
+          <p class="muted">
+            AI 接口默认只读。<br />处理须主人单独授权。
+          </p>
+        </div>
+      </aside>
+      <main>
+        <section id="login-panel" class="login-card">
+          <p class="eyebrow">只属于你的资料库</p>
+          <h1>让收藏，<br />成为可引用的资料。</h1>
+          <p class="muted">
+            使用首次启动时生成的产品访问口令登录。<br />这里不接收抖音密码，也不接收模型
+            API Key。
+          </p>
+          <form id="login-form">
+            <label for="access-token">产品访问口令</label
+            ><input
+              id="access-token"
+              type="password"
+              autocomplete="off"
+              required
+              placeholder="输入本机生成的访问口令"
+            /><button type="submit">进入资料库</button>
+          </form>
+          <p id="login-error" class="error" role="alert"></p>
+        </section>
+        <div id="workspace" hidden>
+          <section id="materials" class="page" hidden>
+            <div class="heading">
+              <div>
+                <p class="eyebrow">COLLECTIONS / 本地资料</p>
+                <h1>你留下的那些灵感。</h1>
+                <p class="muted">
+                  找到原文、转写和画面证据。收藏只是资料与兴趣线索。
+                </p>
+              </div>
+              <span id="material-count" class="count">—</span>
+            </div>
+            <form id="search-form" class="searchbar">
+              <label class="sr-only" for="query">搜索资料</label
+              ><input
+                id="query"
+                placeholder="搜索工具、关键词或教程 · 空格分隔词"
+              /><label class="sr-only" for="source-filter">来源</label
+              ><select id="source-filter">
+                <option value="">所有来源</option>
+                <option value="liked">喜欢</option>
+                <option value="saved">收藏</option>
+                <option value="collection">收藏夹</option>
+                <option value="creator">博主作品</option>
+                <option value="link">单链接</option></select
+              ><button type="submit">查找</button>
+            </form>
+            <p
+              id="search-message"
+              class="muted"
+              role="status"
+              aria-live="polite"
+            ></p>
+            <div class="material-grid">
+              <section class="material-list" aria-label="资料列表">
+                <div id="items"></div>
+                <button id="more-items" class="secondary" hidden>
+                  继续查看
+                </button>
+              </section>
+              <section id="detail" class="detail" aria-label="资料内容">
+                <div class="empty">
+                  <span class="empty-mark">↗</span>
+                  <h2>选择一份资料</h2>
+                  <p>原文与提取分开查看。<br />缺失或过期的内容会明确说明。</p>
+                </div>
+              </section>
+            </div>
+          </section>
+          <section id="connect" class="page" hidden>
+            <div class="heading">
+              <div>
+                <p class="eyebrow">SOURCES / 连接资料</p>
+                <h1>从你选择的来源开始。</h1>
+                <p class="muted">
+                  首版聚焦抖音。每种来源保留关系，同一作品只存一份。
+                </p>
+              </div>
+            </div>
+            <div class="notice">
+              同步范围可登记、手动排队或配置定时。执行须另行启动已授权的后台，并使用本产品独立登录；页面不会请求模型。下方显示刷新时的后台快照，超过30秒需重新确认。
+            </div>
+            <section class="card management-section" aria-label="添加单条作品">
+              <h2>添加一条抖音作品</h2>
+              <p class="muted">粘贴完整作品链接、短链接或含一个链接的分享文字。这里只登记一条，不扩大到博主或历史列表。</p>
+              <form id="link-form"><fieldset id="link-fields" disabled>
+                <label for="link-url">作品链接或分享文字</label><textarea id="link-url" rows="3" maxlength="8192" required></textarea>
+                <label class="check"><input id="link-download" type="checkbox">下载并准备原媒体；不请求模型</label>
+                <label class="check"><input id="link-confirmed" type="checkbox">确认仅访问此作品及上述下载范围</label>
+                <button type="submit">登记单条任务</button>
+              </fieldset></form>
+              <p class="muted">后台须单独允许来源访问。此确认不启用收费提取；若已另行开启新增自动提取，仍受原有授权和调用上限约束。</p>
+              <p id="link-feedback" role="status" aria-live="polite"></p>
+              <div id="link-result"></div>
+              <button id="link-refresh" type="button" class="secondary" disabled>刷新本条任务</button>
+            </section>
+            <section class="card management-section" aria-label="独立连接证明">
+              <div class="heading"><h2>本人账号与收藏夹</h2><button id="refresh-connection" class="secondary">刷新本地连接</button></div>
+              <p id="connection-state" class="notice" role="status"></p>
+              <p class="muted">刷新只读取本地证明。主动连接才访问平台；有桌面时登录窗口出现在后台所在电脑，无桌面只验证已有独立登录。证明15分钟后过期，保存范围不代表同步或授权模型。收藏夹兼容性仍待真实账号验证。</p>
+              <fieldset id="connection-actions" disabled>
+                <label class="check"><input id="connection-access-confirmed" type="checkbox">允许本次独立浏览器访问本人账号页面；不获取作品、不调用模型</label>
+                <div class="actions"><button id="connection-login" type="button">打开独立登录</button><button id="connection-check" type="button" class="secondary">验证已有登录</button><button id="connection-folders" type="button" class="secondary">发现收藏夹</button></div>
+              </fieldset>
+              <p id="connection-run-state" class="muted" role="status" aria-live="polite">后台连接入口尚未读取。</p>
+              <button id="connection-cancel" type="button" class="secondary" disabled>取消本次验证</button>
+              <p class="muted">验证期间可继续看资料；退出本页不会自动取消已确认的验证。取消在当前页面操作结束后生效，已确认结果可能保留。</p>
+            </section>
+            <div class="source-grid">
+              <article class="card">
+                <span class="tag">本人来源</span>
+                <h2>喜欢与收藏</h2>
+                <p>保留兴趣线索。未知的喜欢时间，不会冒充最近点赞。</p>
+                <form id="self-source-form"><fieldset id="self-source-fields" disabled>
+                  <label for="self-source-kind">选择本人列表</label><select id="self-source-kind"><option value="saved">收藏</option><option value="liked">喜欢</option></select>
+                  <label for="self-source-limit">每批最多作品数</label><input id="self-source-limit" type="number" min="1" max="20" value="5" required />
+                  <label class="check"><input id="self-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</label>
+                  <label class="check"><input id="self-source-confirmed" type="checkbox" required />确认本人列表；本次仅登记范围</label>
+                  <button type="submit">保存本人范围</button>
+                </fieldset></form>
+              </article>
+              <article class="card">
+                <span class="tag">按范围选择</span>
+                <h2>指定收藏夹</h2>
+                <p>只同步你选择的收藏夹。同一作品的其他来源仍会保留。</p>
+                <form id="folder-source-form"><fieldset id="folder-source-fields" disabled>
+                  <label for="folder-source-id">已观察收藏夹</label><select id="folder-source-id" required></select>
+                  <p id="folder-coverage" class="muted"></p>
+                  <label for="folder-source-limit">每批最多作品数</label><input id="folder-source-limit" type="number" min="1" max="20" value="5" required />
+                  <label class="check"><input id="folder-source-download" type="checkbox" />同步时下载并准备媒体，不调用模型</label>
+                  <label class="check"><input id="folder-source-confirmed" type="checkbox" required />确认此收藏夹；本次仅登记范围</label>
+                  <button type="submit">保存收藏夹范围</button>
+                </fieldset></form>
+              </article>
+              <article class="card">
+                <span class="tag">资料来源</span>
+                <h2>博主已发布作品</h2>
+                <p>登记完整博主主页，只收集已发布作品。首次建议5条；保存范围不会立即访问抖音。</p>
+                <form id="creator-form">
+                  <fieldset id="creator-fields" disabled>
+                    <label for="creator-url">完整抖音博主主页</label>
+                    <input id="creator-url" type="url" required maxlength="8192" placeholder="https://www.douyin.com/user/…" />
+                    <label for="creator-limit">每批最多作品数</label>
+                    <input id="creator-limit" type="number" min="1" max="20" value="5" required />
+                    <label class="check"><input id="creator-download" type="checkbox" />同步时下载附件并准备音轨与画面（不调用模型）</label>
+                    <button type="submit">保存博主范围</button>
+                  </fieldset>
+                </form>
+              </article>
+            </div>
+            <section class="card management-section" aria-label="同步范围">
+              <div class="heading"><h2>已登记同步范围</h2><button id="refresh-sources" class="secondary">刷新范围</button></div>
+              <p id="source-state" class="muted" role="status"></p>
+              <p class="muted">每轮观察最新指定数量，不代表全历史同步。关闭定时不会取消手动批次；已经开始的访问可能继续，暂停在检查点生效。同步与收费提取开关独立。</p>
+              <p id="source-feedback" class="error" role="status" aria-live="polite"></p>
+              <div id="source-list"></div>
+              <button id="sources-more" class="secondary" hidden>下一页同步范围</button>
+            </section>
+          </section>
+          <section id="activity" class="page" hidden>
+            <div class="heading">
+              <div>
+                <p class="eyebrow">PROCESSING / 处理与设置</p>
+                <h1>知道资料走到了哪一步。</h1>
+                <p class="muted">查状态不会重试提取，也不会产生模型费用。</p>
+              </div>
+            </div>
+            <div id="overview"></div>
+            <p id="management-state" class="notice" role="status"></p>
+            <p id="management-feedback" role="status" aria-live="polite"></p>
+            <div class="source-grid">
+              <article class="card">
+                <h2>音频、视觉、总结</h2>
+                <p>云模型由你提供。三个角色分别配置，允许复用兼容模型。</p>
+                <span class="tag">下方分别配置 · 保存不请求模型</span>
+              </article>
+              <article class="card">
+                <h2>自动运行</h2>
+                <p id="auto-state">加载状态…</p>
+                <form id="auto-form">
+                  <fieldset id="auto-fields" disabled>
+                    <label for="auto-enabled">新增资料自动提取</label>
+                    <select id="auto-enabled"><option value="no">关闭</option><option value="yes">开启</option></select>
+                    <label for="auto-calls">每条最多云请求次数</label>
+                    <input id="auto-calls" type="number" min="0" max="1000" value="2" required />
+                    <label for="auto-tasks">本次最多新增任务</label>
+                    <input id="auto-tasks" type="number" min="1" max="1000" value="5" required />
+                    <label class="check"><input id="auto-fee" type="checkbox" />我确认上传媒体及此调用上限；金额未知</label>
+                    <button type="submit">保存自动规则</button>
+                  </fieldset>
+                </form>
+              </article>
+              <article class="card">
+                <h2>给 AI 读取</h2>
+                <p>
+                  命令行、MCP 与认证 HTTP 共用读库能力，默认不授予处理权限。
+                </p>
+                <span class="tag">搜索 · 读取 · 状态</span>
+              </article>
+            </div>
+            <section class="card management-section" aria-label="模型配置">
+              <div class="heading"><h2>模型与接口</h2><button id="refresh-models" class="secondary">刷新配置</button></div>
+              <p id="model-state" class="notice" role="status"></p>
+              <p class="muted">接口与识别模型由你提供。保存只登记配置，不代表模型能力或密钥已验证；执行须另行授权，可能上传媒体并计费。修改默认值不改变已有任务的固定配置。刷新、退出或提交后会清空密钥输入，不回显已保存密钥。</p>
+              <p id="model-feedback" class="error" role="status" aria-live="polite"></p>
+              <div id="model-forms" class="source-grid"></div>
+            </section>
+            <section class="card management-section" aria-label="历史补处理">
+              <h2>选择历史资料</h2>
+              <p class="muted">仅列出已准备媒体的资料，每批最多20条。提交只登记任务，须另行授权后台执行器；可能复用成功阶段，未知费用不会自动重试。</p>
+              <form id="history-form">
+                <fieldset id="history-fields" disabled>
+                  <div id="prepared-items"></div>
+                  <label for="history-calls">每条最多云请求次数</label>
+                  <input id="history-calls" type="number" min="0" max="1000" value="2" required />
+                  <p id="history-budget" class="muted"></p>
+                  <label class="check"><input id="history-fee" type="checkbox" required />确认所选媒体上传及调用上限；金额未知</label>
+                  <button type="submit">提交所选历史批次</button>
+                </fieldset>
+              </form>
+              <button id="prepared-more" class="secondary" hidden>下一页历史资料</button>
+            </section>
+            <section class="card management-section" aria-label="任务状态">
+              <div class="heading"><h2>已登记任务</h2><button id="refresh-tasks" class="secondary">刷新状态</button></div>
+              <p id="worker-state" class="notice" role="status"></p>
+              <p class="muted">在线状态是刷新时的内核所有权快照，不能证明处理进度或识别成功；离开页面或长时间未刷新后需重新确认。取消只停止后续阶段，已发出请求可能继续计费。</p>
+              <div id="task-list"></div>
+              <button id="tasks-more" class="secondary" hidden>下一页任务</button>
+            </section>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div class="footer">
+      LOCAL FIRST <span>·</span> 来源可追溯 <span>·</span> 准确度与覆盖需核对
+    </div>
+  </body>
+</html>
