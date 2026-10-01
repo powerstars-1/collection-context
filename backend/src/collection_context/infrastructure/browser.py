@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.files import SafeFiles
@@ -13,6 +13,10 @@ from collection_context.infrastructure.runtime_dependencies import RuntimeDepend
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Playwright
+
+
+class _LaunchOptions(TypedDict, total=False):
+    executable_path: str
 
 
 class BrowserSession:
@@ -77,7 +81,7 @@ class BrowserSession:
             if dependencies is not None and dependencies.resolve(role) != expected_tool:
                 raise ContextError("runtime_dependency_integrity", "启动期间浏览器依赖版本改变，未切换执行。")
             self.runtime = sync_playwright().start()
-            options = {}
+            options: _LaunchOptions = {}
             if dependencies is not None:
                 # Recheck just before launch; a configured failure never falls back to SDK caches.
                 actual_tool = dependencies.resolve(role)

@@ -1,7 +1,7 @@
 """Explicit local desktop startup with an in-process, main-thread GUI bridge.
 
 No GUI operation runs on the service thread.  Secrets only cross this process's
-queue; no subprocess, clipboard, environment, file, URL, or log is used.  This
+queue; no subprocess, automatic clipboard export, environment, file, URL, or log is used.  This
 source module does not imply that a complete desktop distribution was built.
 """
 
@@ -39,6 +39,95 @@ class DesktopStatus:
     state: str
     message: str
     code: str | None = None
+
+
+@dataclass(frozen=True)
+class DiagnosticParameters:
+    workspace: str
+    port: int
+    initialize_empty: bool
+
+
+@dataclass(frozen=True)
+class DiagnosticResult:
+    generation: int
+    parameters: DiagnosticParameters
+    workspace: Path | None = field(default=None, repr=False)
+    report: dict[str, Any] | None = field(default=None, repr=False)
+
+
+class DesktopDiagnostics:
+    """One bounded, read-only worker; cancellation invalidates results, not syscalls.
+
+    Directory access can wait indefinitely for OS permission or a disconnected
+    volume. This daemon never touches Tk, initializes a library, grants access,
+    or starts services. Closing the window does not join it or claim its syscall
+    returned. At most one check runs; a newer request replaces the pending one.
+    Service workers remain non-daemon and have their separate stop lifecycle.
+    """
+
+    def __init__(self, *, checker: Callable[..., dict[str, Any]] = startup_report) -> None:
+        self.events: queue.Queue[DiagnosticResult] = queue.Queue()
+        self._checker = checker
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._current: DiagnosticParameters | None = None
+        self._pending: tuple[int, DiagnosticParameters] | None = None
+        self._running = False
+        self._worker: threading.Thread | None = None
+
+    @property
+    def active(self) -> bool:
+        with self._lock:
+            return self._running
+
+    @property
+    def generation(self) -> int:
+        with self._lock:
+            return self._generation
+
+    def request(self, parameters: DiagnosticParameters) -> int:
+        with self._lock:
+            if self._running and parameters == self._current:
+                return self._generation
+            self._generation += 1
+            self._current = parameters
+            self._pending = (self._generation, parameters)
+            if not self._running:
+                self._running = True
+                self._worker = threading.Thread(
+                    target=self._run, name="collection-context-readonly-diagnostics", daemon=True
+                )
+                self._worker.start()
+            return self._generation
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._current = None
+            self._pending = None
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                request = self._pending
+                self._pending = None
+                if request is None:
+                    self._running = False
+                    return
+            generation, parameters = request
+            workspace = None
+            report = None
+            try:
+                # Even home expansion and dependency imports belong off Tk's thread.
+                workspace = Path(parameters.workspace).expanduser()
+                report = self._checker(workspace, parameters.port)
+            except BaseException:
+                # Never retain or render filesystem/model/OS exception details.
+                pass
+            with self._lock:
+                if generation == self._generation and parameters == self._current:
+                    self.events.put(DiagnosticResult(generation, parameters, workspace, report))
 
 
 @dataclass(eq=False)
@@ -225,6 +314,9 @@ class _DesktopWindow:
 
         self.root = tk.Tk()
         self.controller = DesktopController()
+        self.diagnostics = DesktopDiagnostics()
+        self._diagnostic_cache: DiagnosticResult | None = None
+        self._start_intent: int | None = None
         self.close_requested = False
         self.destroyed = False
         self.token_window: _TokenWindow | None = None
@@ -271,6 +363,8 @@ class _DesktopWindow:
             self.stop_button.pack(side="left", padx=10)
             ttk.Button(actions, text="退出", command=self._close).pack(side="right")
             self.root.protocol("WM_DELETE_WINDOW", self._close)
+            for variable in (self.workspace, self.port, self.initialize):
+                variable.trace_add("write", self._parameters_changed)
             self._refresh_dependencies()
             self.root.after(75, self._poll)
         except BaseException:
@@ -292,8 +386,13 @@ class _DesktopWindow:
             pass
 
     def _choose(self) -> None:
+        if self.controller.active or self.close_requested:
+            return
+        # The directory dialog runs a nested GUI loop. Invalidate a prior Start
+        # intent before opening it, not only after the user chooses a new path.
+        self._parameters_changed()
         selected = self.filedialog.askdirectory(parent=self.root, mustexist=False)
-        if selected:
+        if selected and not self.close_requested:
             self.workspace.set(selected)
             self._refresh_dependencies()
 
@@ -303,15 +402,40 @@ class _DesktopWindow:
         port = int(self.port.get())
         if not 1 <= port <= 65_535:
             raise ValueError
-        return Path(self.workspace.get()).expanduser(), port
+        return Path(self.workspace.get()), port
+
+    def _diagnostic_parameters(self) -> DiagnosticParameters:
+        workspace, port = self._parameters()
+        return DiagnosticParameters(str(workspace), port, self.initialize.get() is True)
+
+    def _parameters_changed(self, *_trace_details: Any) -> None:
+        self.diagnostics.cancel()
+        self._diagnostic_cache = None
+        self._start_intent = None
+        self.dependencies.set("参数已更新，需重新检测；没有安装或下载任何组件。")
+        self.status.set("尚未启动；请重新检测当前资料库和端口。")
+        self._controls(self.controller.active)
 
     def _refresh_dependencies(self) -> dict[str, Any] | None:
+        if self.close_requested:
+            return None
         try:
-            workspace, port = self._parameters()
-            report = startup_report(workspace, port)
-            self.dependencies.set(capability_description(report))
-            return report
+            parameters = self._diagnostic_parameters()
+            cached = self._diagnostic_cache
+            if (
+                cached is not None
+                and cached.generation == self.diagnostics.generation
+                and cached.parameters == parameters
+            ):
+                return cached.report
+            self.diagnostics.request(parameters)
+            self.dependencies.set("正在后台只读检测；系统可能正在等待目录授权。没有安装或下载组件。")
+            self._controls(self.controller.active)
+            return None
         except Exception:
+            self.diagnostics.cancel()
+            self._diagnostic_cache = None
+            self._start_intent = None
             self.dependencies.set("依赖检查未完成；没有安装或下载任何组件。")
             return None
 
@@ -320,8 +444,19 @@ class _DesktopWindow:
             return
         report = self._refresh_dependencies()
         if report is None:
-            self.status.set("请检查资料库路径和端口。")
+            try:
+                self._diagnostic_parameters()
+            except Exception:
+                self.status.set("请检查资料库路径和端口。")
+                return
+            self._start_intent = self.diagnostics.generation
+            self.status.set("检测完成后才会启动；等待期间可修改参数、停止或退出。")
+            self._controls(False)
             return
+        diagnostics = getattr(self, "diagnostics", None)
+        generation = diagnostics.generation if diagnostics is not None else None
+        parameters = self._parameters()
+        initialize_empty = self.initialize.get() is True
         if not report["capabilities"]["ready_for_management_page"]:
             self.status.set("启动依赖未就绪；请配置运行环境后重试。")
             return
@@ -341,8 +476,22 @@ class _DesktopWindow:
         elif state != "initialized_candidate":
             self.status.set("目录不可用，或含有未识别的资料；不会覆盖或自动迁移。")
             return
-        workspace, port = self._parameters()
-        self.controller.start(workspace, port=port, initialize_empty=self.initialize.get())
+        # askyesno has a nested Tk event loop: Stop/Close/parameter edits can run
+        # during the dialog. Consent never authorizes an obsolete check.
+        if (
+            self.close_requested
+            or self.controller.active
+            or (diagnostics is not None and diagnostics.generation != generation)
+            or parameters != self._parameters()
+            or initialize_empty != (self.initialize.get() is True)
+        ):
+            return
+        workspace, port = parameters
+        cached = getattr(self, "_diagnostic_cache", None)
+        if cached is not None and cached.workspace is not None:
+            workspace = cached.workspace
+        self._start_intent = None
+        self.controller.start(workspace, port=port, initialize_empty=initialize_empty)
         self._controls(True)
 
     def _controls(self, active: bool) -> None:
@@ -351,12 +500,26 @@ class _DesktopWindow:
             self.choose_button,
             self.init_check,
             self.port_entry,
-            self.start_button,
         ):
             widget.configure(state="disabled" if active or self.close_requested else "normal")
-        self.stop_button.configure(state="normal" if active else "disabled")
+        self.start_button.configure(
+            state="disabled" if active or self.close_requested or self._start_intent is not None else "normal"
+        )
+        self.stop_button.configure(
+            state="normal"
+            if active or self.diagnostics.active or self._start_intent is not None
+            else "disabled"
+        )
 
     def _stop(self) -> None:
+        diagnostics = getattr(self, "diagnostics", None)
+        if diagnostics is not None:
+            waiting = diagnostics.active
+            diagnostics.cancel()
+            self._diagnostic_cache = None
+            self._start_intent = None
+            if waiting and not self.controller.active:
+                self.status.set("已取消使用检测结果，未启动服务；系统目录检查可能仍在等待返回。")
         self.controller.request_stop()
         if self.token_window is not None:
             self.token_window.clear_and_close()
@@ -380,6 +543,7 @@ class _DesktopWindow:
             return
         # Schedule before a nested token dialog so Stop/Close remains responsive.
         self.root.after(75, self._poll)
+        self._poll_diagnostics()
         while True:
             try:
                 event = self.controller.events.get_nowait()
@@ -395,6 +559,42 @@ class _DesktopWindow:
         if self.close_requested and not self.controller.active:
             self.destroyed = True
             self.root.destroy()
+
+    def _poll_diagnostics(self) -> None:
+        while True:
+            try:
+                event = self.diagnostics.events.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                parameters = self._diagnostic_parameters()
+            except Exception:
+                continue
+            if (
+                self.close_requested
+                or self.controller.active
+                or event.generation != self.diagnostics.generation
+                or event.parameters != parameters
+            ):
+                continue
+            if event.report is None:
+                self._start_intent = None
+                self.dependencies.set("只读检测未完成；未显示内部异常，没有安装或下载组件。")
+                self.status.set("检测失败，未启动服务；请检查目录授权、运行环境或修改参数后重试。")
+                continue
+            try:
+                description = capability_description(event.report)
+            except Exception:
+                self._start_intent = None
+                self.status.set("检测结果不可用，未启动服务；未显示内部异常。")
+                continue
+            self._diagnostic_cache = event
+            self.dependencies.set(description)
+            if self._start_intent == event.generation:
+                self._start_intent = None
+                self._start()
+            else:
+                self.status.set("只读检测已完成；尚未启动，请明确点击启动。")
 
     def show(self) -> None:
         self.root.mainloop()
@@ -423,6 +623,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = 2
     finally:
         if window is not None:
+            diagnostics = getattr(window, "diagnostics", None)
+            if diagnostics is not None:
+                diagnostics.cancel()
+                if diagnostics.active:
+                    print(
+                        "desktop_diagnostics_abandoned: 已放弃只读检测结果；系统调用尚未确认返回，未等待其退出。",
+                        file=sys.stderr,
+                    )
             window.controller.request_stop()
             window.controller.join(timeout=5)
             if window.controller.active:

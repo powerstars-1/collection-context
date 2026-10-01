@@ -22,7 +22,9 @@ def present_owner_token(token: str, *, window_factory: Callable[[], Any] | None 
     True means the user explicitly acknowledged saving it.  Closing or cancelling
     returns False; the launcher must revoke its newly created credential in either
     cancellation or failure.  Python/Tk memory is cleared best-effort, not promised
-    cryptographic zeroization.  No clipboard operation, file, URL, or logging occurs.
+    cryptographic zeroization. Clipboard export is only available through an
+    explicit user action in the window; display/confirmation/close never copy.
+    No automatic file, URL, environment, subprocess, or logging transfer occurs.
     """
     if not isinstance(token, str) or not token.startswith("scc_") or len(token) < 32:
         raise ContextError("invalid_argument", "只能展示新建的产品访问口令。")
@@ -56,6 +58,7 @@ class _TokenWindow:
         self.parent = parent
         self.root: Any = tk.Tk() if parent is None else tk.Toplevel(parent)
         self.secret: Any = None
+        self.copy_status: Any = None
         self.closed = False
         self.result = False
         try:
@@ -71,9 +74,10 @@ class _TokenWindow:
 
     def _build(self, tk: Any, ttk: Any) -> None:
         self.root.title("收藏上下文 · 保存本机管理口令")
-        self.root.geometry("640x280")
+        self.root.geometry("640x440")
         self.root.resizable(False, False)
         self.secret = tk.StringVar(master=self.root)
+        self.copy_status = tk.StringVar(master=self.root)
         saved = tk.BooleanVar(master=self.root, value=False)
         frame = ttk.Frame(self.root, padding=24)
         frame.pack(fill="both", expand=True)
@@ -83,9 +87,25 @@ class _TokenWindow:
             text="请自行保存，随后用它登录本机管理页。\n它不是模型 API Key，请不要发到聊天或公开仓库。",
             justify="left",
         ).pack(anchor="w", pady=12)
-        # A label has no Tk copy/selection binding (a readonly Entry still has one).
-        self.entry = ttk.Label(frame, textvariable=self.secret, font="TkFixedFont", wraplength=590)
+        # Selection itself must not export to X11 PRIMARY. Explicit user copy
+        # (the button or an Entry keyboard action) is distinct from auto-export.
+        self.entry = ttk.Entry(
+            frame,
+            textvariable=self.secret,
+            font="TkFixedFont",
+            state="readonly",
+            exportselection=False,
+        )
         self.entry.pack(fill="x", pady=4)
+        ttk.Button(frame, text="复制口令到本机剪贴板", command=self._copy_token).pack(anchor="w", pady=8)
+        ttk.Label(
+            frame,
+            text="剪贴板历史、跨设备同步或其他应用可能读取口令。\n"
+            "请自行粘贴到密码管理器保存，不要发到聊天；复制不代表已经保存。",
+            justify="left",
+            wraplength=590,
+        ).pack(anchor="w", pady=4)
+        ttk.Label(frame, textvariable=self.copy_status, wraplength=590).pack(anchor="w", pady=4)
         ttk.Checkbutton(frame, text="我已自行保存这个口令", variable=saved).pack(anchor="w", pady=12)
         actions = ttk.Frame(frame)
         actions.pack(fill="x")
@@ -100,6 +120,29 @@ class _TokenWindow:
             side="right", padx=12
         )
         self.root.protocol("WM_DELETE_WINDOW", self.clear_and_close)
+
+    def _copy_token(self) -> bool:
+        """User-click handler only; never called by lifecycle or confirmation."""
+        if self.closed or threading.current_thread() is not threading.main_thread():
+            return False
+        try:
+            token = self.secret.get()
+            if not isinstance(token, str) or not token.startswith("scc_") or len(token) < 32:
+                return False
+            self.root.clipboard_clear()
+            self.root.clipboard_append(token)
+        except BaseException:
+            self._copy_feedback("复制未能确认完成，请自行选择口令并保存；未显示内部异常。")
+            return False
+        self._copy_feedback("已复制到本机剪贴板。请自行保存，再勾选下方确认；不会自动清理剪贴板。")
+        return True
+
+    def _copy_feedback(self, message: str) -> None:
+        try:
+            self.copy_status.set(message)
+        except BaseException:
+            # Broken GUI feedback must not fall through Tk's exception reporter.
+            pass
 
     def show(self, token: str) -> bool:
         if self.closed:
