@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager, contextmanager
+from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest
@@ -34,9 +35,11 @@ class AdditionWorkflow:
         source_factory: Callable[[], AbstractContextManager[DouyinBrowserSource]] | None = None,
         *,
         agent_authority: Callable[[str], None] | None = None,
+        runtime_dir: Path | None = None,
     ):
         self.store, self.source_factory = store, source_factory
         self.agent_authority = agent_authority
+        self.runtime_dir = runtime_dir
         self.jobs = JobManager(store)
 
     def authorize(self, principal: str) -> None:
@@ -273,7 +276,7 @@ class AdditionWorkflow:
                         raise ContextError(
                             "source_snapshot_changed", "恢复观察中作品变化，未覆盖固定检查点。"
                         )
-                    ingestion = IngestionWorkflow(ingestion_store, source)
+                    ingestion = IngestionWorkflow(ingestion_store, source, runtime_dir=self.runtime_dir)
                     result = (
                         previous["result"]
                         if previous

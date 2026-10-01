@@ -9,19 +9,40 @@ from typing import TYPE_CHECKING
 
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.files import SafeFiles
+from collection_context.infrastructure.runtime_dependencies import RuntimeDependencies
 
 if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Playwright
 
 
 class BrowserSession:
-    def __init__(self, profile_dir: Path, *, headless: bool = True):
+    def __init__(
+        self,
+        profile_dir: Path,
+        *,
+        headless: bool = True,
+        runtime_dir: Path | None = None,
+        library_dir: Path | None = None,
+    ):
         self.profile_dir = profile_dir.absolute()
         self.headless = headless
+        self.runtime_dir = runtime_dir
+        self.library_dir = library_dir
         self.runtime: Playwright | None = None
         self.context: BrowserContext | None = None
 
     def __enter__(self):
+        dependencies = None
+        expected_tool = None
+        role = "chromium_headless_shell" if self.headless else "chromium"
+        if self.runtime_dir is not None:
+            if self.library_dir is None:
+                raise ContextError("invalid_argument", "显式运行依赖必须绑定资料库边界。")
+            runtime, profile = self.runtime_dir.resolve(), self.profile_dir.resolve()
+            if runtime.is_relative_to(profile) or profile.is_relative_to(runtime):
+                raise ContextError("runtime_directory_overlap", "运行依赖与独立账号目录必须分开。")
+            dependencies = RuntimeDependencies(self.runtime_dir, library_dir=self.library_dir)
+            expected_tool = dependencies.resolve(role)  # Fail before profile writes or a browser process.
         if self.profile_dir.is_symlink():
             raise ContextError("unsafe_login_profile", "登录目录不能为链接。")
         existed = self.profile_dir.exists()
@@ -53,16 +74,31 @@ class BrowserSession:
         try:
             from playwright.sync_api import sync_playwright
 
+            if dependencies is not None and dependencies.resolve(role) != expected_tool:
+                raise ContextError("runtime_dependency_integrity", "启动期间浏览器依赖版本改变，未切换执行。")
             self.runtime = sync_playwright().start()
+            options = {}
+            if dependencies is not None:
+                # Recheck just before launch; a configured failure never falls back to SDK caches.
+                actual_tool = dependencies.resolve(role)
+                if actual_tool != expected_tool:
+                    raise ContextError(
+                        "runtime_dependency_integrity", "启动期间浏览器依赖版本改变，未切换执行。"
+                    )
+                options["executable_path"] = str(actual_tool.path)
             self.context = self.runtime.chromium.launch_persistent_context(
                 str(self.profile_dir),
                 headless=self.headless,
                 viewport={"width": 1200, "height": 850},
                 accept_downloads=False,
+                **options,
             )
             return self
         except ImportError:
             raise ContextError("browser_unavailable", "未安装浏览器接入依赖。") from None
+        except ContextError:
+            self.close()
+            raise
         except Exception:
             self.close()
             raise ContextError(

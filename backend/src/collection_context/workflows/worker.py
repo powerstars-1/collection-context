@@ -62,6 +62,7 @@ class BackgroundWorker:
             self.store,
             sync_workflow.source_factory if sync_workflow else None,
             agent_authority=addition_authority,
+            runtime_dir=sync_workflow.runtime_dir if sync_workflow else None,
         )
 
     def _drain(

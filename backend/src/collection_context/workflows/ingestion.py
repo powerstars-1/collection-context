@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from collection_context.application.contracts import ContextError, digest, utc_now, validate_source
@@ -18,10 +19,16 @@ if TYPE_CHECKING:
 
 class IngestionWorkflow:
     def __init__(
-        self, store: LibraryStore, source: DouyinBrowserSource, downloads: DouyinDownloads | None = None
+        self,
+        store: LibraryStore,
+        source: DouyinBrowserSource,
+        downloads: DouyinDownloads | None = None,
+        *,
+        runtime_dir: Path | None = None,
     ):
         self.store, self.source = store, source
         self.downloads = downloads or DouyinDownloads()
+        self.runtime_dir = runtime_dir
 
     def add_link(self, url: str, *, download: bool = False) -> dict[str, Any]:
         observed = self.source.fetch_item(url)
@@ -156,7 +163,7 @@ class IngestionWorkflow:
             raise ContextError("version_changed", "来源媒体身份已变化或资料已排除，未继续下载。")
         output = dict(output)
         try:
-            registry = PreparedInputs(self.store)
+            registry = PreparedInputs(self.store, runtime_dir=self.runtime_dir)
             identity = registry.reusable_source(item["id"], source_asset_hash)
             reused = identity is not None
             if identity is None:

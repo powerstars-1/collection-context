@@ -38,6 +38,7 @@ from collection_context.workflows.worker import BackgroundWorker
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="收藏上下文：独立文件库与受控读取（开发版）")
     result.add_argument("--workspace", type=Path, required=True, help="新产品工作目录；不是旧 Obsidian 库")
+    result.add_argument("--runtime-dir", type=Path, help="显式库外运行依赖目录；无效时不回退系统工具")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("init", help="只初始化新空目录，不覆盖已有文件")
     commands.add_parser("upgrade-writer", help="显式升级早期开发库写锁；保留资料，不自动清除旧占用")
@@ -213,13 +214,16 @@ def no_model_authority(_: str) -> str:
 
 
 @contextmanager
-def source_session(store: LibraryStore, profile: Path, *, headless: bool = True):
+def source_session(
+    store: LibraryStore, profile: Path, *, headless: bool = True, runtime_dir: Path | None = None
+):
     profile = profile.absolute()
     root = store.files.root.resolve()
     resolved = profile.resolve()
     if resolved.is_relative_to(root) or root.is_relative_to(resolved):
         raise ContextError("unsafe_login_profile", "登录目录必须与可导出资料库分开。")
-    with BrowserSession(profile, headless=headless) as browser:
+    options = {"runtime_dir": runtime_dir, "library_dir": store.files.root} if runtime_dir is not None else {}
+    with BrowserSession(profile, headless=headless, **options) as browser:
         yield DouyinBrowserSource(browser)
 
 
@@ -323,7 +327,9 @@ def main(argv: list[str] | None = None) -> int:
                 media, mime = local_media(args.input)
                 if not mime.startswith("video/"):
                     raise ContextError("unsupported_media", "视频准备仅接受受支持的视频文件。")
-                identity = PreparedInputs(store).prepare_video(args.ref, media, mime_type=mime)
+                identity = PreparedInputs(store, runtime_dir=args.runtime_dir).prepare_video(
+                    args.ref, media, mime_type=mime
+                )
                 data = {"input_id": identity, "model_requests": 0}
             elif args.command == "prepare-images":
                 identity = PreparedInputs(store).prepare_images(
@@ -417,7 +423,11 @@ def main(argv: list[str] | None = None) -> int:
                 workflow = ExtractionWorkflow(store, secrets.get if secrets else no_model_authority)
                 sync_workflow = (
                     SynchronizationWorkflow(
-                        store, lambda: source_session(store, args.browser_dir, headless=not args.headed)
+                        store,
+                        lambda: source_session(
+                            store, args.browser_dir, headless=not args.headed, runtime_dir=args.runtime_dir
+                        ),
+                        runtime_dir=args.runtime_dir,
                     )
                     if args.allow_source_sync
                     else None
@@ -449,7 +459,11 @@ def main(argv: list[str] | None = None) -> int:
                 from collection_context.workflows.addition import AdditionWorkflow
 
                 addition = AdditionWorkflow(
-                    store, lambda: source_session(store, args.browser_dir, headless=not args.headed)
+                    store,
+                    lambda: source_session(
+                        store, args.browser_dir, headless=not args.headed, runtime_dir=args.runtime_dir
+                    ),
+                    runtime_dir=args.runtime_dir,
                 )
                 job = addition.submit(
                     url=args.url,
@@ -480,7 +494,13 @@ def main(argv: list[str] | None = None) -> int:
                 if profile.is_relative_to(root) or root.is_relative_to(profile):
                     raise ContextError("unsafe_login_profile", "登录目录必须与可导出资料库分开。")
                 with BrowserSession(
-                    profile, headless=args.command != "connect-douyin" and not getattr(args, "headed", False)
+                    profile,
+                    headless=args.command != "connect-douyin" and not getattr(args, "headed", False),
+                    **(
+                        {"runtime_dir": args.runtime_dir, "library_dir": store.files.root}
+                        if args.runtime_dir is not None
+                        else {}
+                    ),
                 ) as browser:
                     source = DouyinBrowserSource(browser)
                     if args.command == "connect-douyin":
@@ -508,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
                     elif args.command == "discover-collections":
                         data = ConnectionWorkflow(store, source).observe(discover=True, limit=args.limit)
                     elif args.command == "sync-creator":
-                        data = IngestionWorkflow(store, source).sync_creator(
+                        data = IngestionWorkflow(store, source, runtime_dir=args.runtime_dir).sync_creator(
                             args.url, limit=args.limit, download=args.download
                         )
             else:

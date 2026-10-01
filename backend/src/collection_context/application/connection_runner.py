@@ -30,6 +30,7 @@ class ConnectionRunner:
         profile: Path,
         *,
         headless: bool = False,
+        runtime_dir: Path | None = None,
         operation: Callable[[str, threading.Event], None] | None = None,
     ):
         if type(headless) is not bool:
@@ -37,6 +38,7 @@ class ConnectionRunner:
         separate_browser(workspace, profile)
         self.workspace, self.profile = workspace.absolute(), profile.absolute()
         self.headless = headless
+        self.runtime_dir = runtime_dir
         self._operation = operation or self._observe
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -57,7 +59,12 @@ class ConnectionRunner:
         store = LibraryStore(self.workspace)
         try:
             self._check_stop(stop)
-            with BrowserSession(self.profile, headless=self.headless) as browser:
+            options = (
+                {"runtime_dir": self.runtime_dir, "library_dir": self.workspace}
+                if self.runtime_dir is not None
+                else {}
+            )
+            with BrowserSession(self.profile, headless=self.headless, **options) as browser:
                 with self._lock:
                     if not stop.is_set():
                         self._status.update(state="running", browser_ready_at=utc_now())

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest, utc_now, valid_id
@@ -63,8 +64,11 @@ class SynchronizationWorkflow:
         self,
         store: LibraryStore,
         source_factory: Callable[[], AbstractContextManager[DouyinBrowserSource]] | None = None,
+        *,
+        runtime_dir: Path | None = None,
     ):
         self.store, self.source_factory = store, source_factory
+        self.runtime_dir = runtime_dir
         self.jobs = JobManager(store)
 
     def configure(
@@ -257,7 +261,7 @@ class SynchronizationWorkflow:
                     )
                     if batch.limit != plan["limit"] or len(batch.items) > plan["limit"]:
                         raise ContextError("source_limit", "来源返回范围超过固定任务数量，未扩大同步。")
-                    ingestion = IngestionWorkflow(self.store, source)
+                    ingestion = IngestionWorkflow(self.store, source, runtime_dir=self.runtime_dir)
                     for native_id, item in batch.items.items():
                         executor.check()
                         if not self._running(ref):

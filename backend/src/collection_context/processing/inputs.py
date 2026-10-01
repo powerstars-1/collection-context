@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Callable
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError, canonical_bytes, digest, valid_id
@@ -17,6 +19,7 @@ from collection_context.infrastructure.media import (
     MediaPolicy,
     PreparedFrame,
 )
+from collection_context.infrastructure.runtime_dependencies import RuntimeDependencies
 from collection_context.library.store import LibraryStore
 
 MAX_TOTAL = 512_000_000
@@ -30,9 +33,42 @@ EXTENSIONS = {
 }
 
 
+class _RuntimeLocalMedia(LocalMedia):
+    """Only an execution preflight guard; sampling, decoding and OCR remain unchanged."""
+
+    def __init__(
+        self,
+        source: bytes,
+        *,
+        policy: MediaPolicy | None,
+        ffmpeg: Path,
+        ffprobe: Path,
+        resolve_tool: Callable[[str], Path],
+    ):
+        self._resolve_tool = resolve_tool
+        self._fixed_tools = {ffmpeg: "ffmpeg", ffprobe: "ffprobe"}
+        super().__init__(source, policy=policy, ffmpeg=ffmpeg, ffprobe=ffprobe)
+
+    def _run(
+        self,
+        executable: Path,
+        arguments: list[str],
+        *,
+        max_bytes: int,
+        consumer: Callable[[bytes], None] | None = None,
+    ) -> bytes:
+        role = self._fixed_tools.get(executable)
+        if role is None or self._resolve_tool(role) != executable:
+            raise ContextError(
+                "runtime_dependency_changed", "媒体运行依赖已变化；未启动解码器，不回退系统 PATH。"
+            )
+        return super()._run(executable, arguments, max_bytes=max_bytes, consumer=consumer)
+
+
 class PreparedInputs:
-    def __init__(self, store: LibraryStore):
+    def __init__(self, store: LibraryStore, *, runtime_dir: Path | None = None):
         self.store = store
+        self.runtime_dir = runtime_dir
 
     @staticmethod
     def _path(ref: str, sha: str, mime: str) -> str:
@@ -439,7 +475,31 @@ class PreparedInputs:
         item = self.store.get(ref)
         if expected_content_hash is not None and item["content_hash"] != expected_content_hash:
             raise ContextError("version_changed", "准备前原资料已变化，未登记旧媒体。")
-        with LocalMedia(data, policy=policy) as media:
+        if self.runtime_dir is None:
+            session = LocalMedia(data, policy=policy)
+        else:
+            runtime = RuntimeDependencies(self.runtime_dir, library_dir=self.store.files.root)
+            pinned = {role: runtime.resolve(role) for role in ("ffmpeg", "ffprobe")}
+
+            def resolve_tool(role: str) -> Path:
+                current = runtime.resolve(role)
+                # A valid replacement receipt must not change a decoder halfway through one
+                # preparation session, even if the installed path remains unchanged.
+                if current != pinned[role]:
+                    raise ContextError(
+                        "runtime_dependency_changed",
+                        "媒体运行依赖版本已变化；请重新开始准备，不回退系统 PATH。",
+                    )
+                return current.path
+
+            session = _RuntimeLocalMedia(
+                data,
+                policy=policy,
+                ffmpeg=pinned["ffmpeg"].path,
+                ffprobe=pinned["ffprobe"].path,
+                resolve_tool=resolve_tool,
+            )
+        with session as media:
             segments = list(media.audio_segments())
             candidates, coverage = media.scan_frames()
             frames: list[PreparedFrame] = []

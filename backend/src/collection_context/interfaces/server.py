@@ -20,6 +20,7 @@ from collection_context.library.store import LibraryStore
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="收藏上下文：认证读接口与管理页（开发版）")
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--runtime-dir", type=Path, help="固定的库外运行依赖目录；仅由启动者配置")
     parser.add_argument("--origin", default="http://127.0.0.1:8787")
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--remote", action="store_true")
@@ -76,7 +77,10 @@ def main(argv: list[str] | None = None) -> int:
             )
         if args.allow_source_connect:
             connection_runner = ConnectionRunner(
-                args.workspace, args.browser_dir, headless=args.source_connect_headless
+                args.workspace,
+                args.browser_dir,
+                headless=args.source_connect_headless,
+                runtime_dir=args.runtime_dir,
             )
         app = create_app(
             args.workspace,
