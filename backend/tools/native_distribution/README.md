@@ -8,10 +8,10 @@
 
 ## 构建边界
 
-- 构建环境新建在仓库外；`requirements-build.in` 锁定四个直接依赖，首次验证时另外生成完整传递依赖的注册表哈希锁。只使用 PyPI 与官方 PyInstaller，不安装参考项目。
+- 构建环境新建在仓库外；`requirements-build.in` 锁定五个直接依赖（含Playwright1.63.0），39个传递构建依赖由完整hash锁固定。只使用PyPI与官方组件，不安装参考项目。
 - `build.py --output <库外专用构建目录>` 仅复制自有 `src/collection_context` 与静态资产，拒绝源码链接和未列入白名单的类型；新建唯一临时 stage，不覆盖已有发行目录。
 - 不自动下载依赖、不使用开发者证书签名、公证、发布或配置常驻服务。macOS ARM64 的 PyInstaller 会自动生成本机运行所需的 ad-hoc 签名；它不是 Apple 开发者签名或公证。构建者需先在隔离环境安装依赖，然后用该环境 Python 执行工具。
-- 基础包不含 Chromium 浏览器、FFmpeg 或 OCR 运行库/权重；无法宣称完整同步与识别均开箱即用。用户模型账户与费用另行配置。
+- 基础包包含Playwright SDK及其wheel内Node／JS，使用官方hook，不读取宿主Node或浏览器缓存；构建前拒绝任何 `.local-browsers`、链接或未注册资源。包不含Chromium浏览器、FFmpeg或OCR运行库／权重；无法宣称完整同步与识别均开箱即用。用户模型账户与费用另行配置。
 - PyInstaller 许可有针对打包应用的例外，但 Python、GUI 库和所有传递依赖仍须保留各自许可。当前候选尚不能替代公开发行许可审查。
 - `licenses.py` 只读取显式构建环境的已登记分发元数据、许可原文和准确注册的前端声明；不导入依赖或扫描用户资料。拒绝链接、硬链接、身份冲突、非空输出与超限读取，记录版本、原文字节哈希和来源相对路径。清单只代表构建环境，不断言每个包都在运行时内；CPython、Tcl/Tk、OpenSSL、原生嵌入组件以及产品许可仍须独立闭合。`runtime_sbom_verified` 固定为 false，不因收齐 dist-info 文件而宣称发行许可完成。
 
@@ -49,4 +49,16 @@ CLI／HTTP／后台的本机启动者可明确选择 `--credential-backend syste
 4. 每份下载固定 HTTPS 来源、大小、SHA-256 和目标平台，先写专用临时目录，验证后原子安装；拒绝归档越界、链接与冲突。中断保留可诊断状态，不隐式重试云请求。
 5. 安装后实际运行探测，再显示就绪；失败保持已建资料库，不启用定时同步或任何费用。用户可跳过并明确获得仅读库/管理页的降级状态。
 
-这些安装器当前仅为契约设计，并未冒充已经实现或实际验收。原生候选实测结果需单列 CLI、MCP、HTTP、停止及异路径运行，构建成功不能代替运行证明。
+2026-10-02 已实现共享固定清单安装器与本地CLI：明确确认、内核独占安装锁、完整包大小／hash、受控解包、分代保留及原子收据。固定HTTPS下载不继承代理、不携带凭据、不自动重试。首个已核实清单仅覆盖Mac14+ ARM64无桌面浏览器；可见登录窗口、FFmpeg配对、OCR权重与其他平台尚未提供，GUI安装向导尚未接通。资料库可不存在，安装不会创建库或启动处理任务。
+
+以绝对路径替换下面的三个独立目录；不要指向旧库、旧账号或其他项目运行目录。原生控制台加前缀 `CollectionContext cli`，源码安装后使用 `collection-context`：
+
+```bash
+collection-context --workspace /absolute/new-library runtime-options
+collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime install-runtime --artifact chromium-headless-macos-arm64-1243 --confirm-install
+collection-context --workspace /absolute/new-library --runtime-dir /absolute/product-runtime probe-runtime --browser-dir /absolute/new-probe-profile
+```
+
+查看命令只显示大小／系统／来源／许可与缺项；确认安装仅授权这份软件，不授权登录、同步或模型费用。安装成功初始为static_verified，功能仍false；探测显式启动新空白浏览器，本机页面成功且关闭后才报告功能通过。探测目录必须不存在，拒绝借用用户登录态；该结果不等于五类抖音来源可用。下载单包128MB／120秒，取消在阻塞网络或文件操作后观察，不谎报立即退出；失败暂存、旧代保留。receipt发布异常可返回outcome_unknown，不自动回滚或重试。
+
+`runtime_smoke.py --binary <明确控制台> --runtime <已验证安装目录> --output <不存在的新库外目录>` 已以新HOME／空PATH验证原生包内驱动、浏览器本机渲染／退出及收据不变；不下载、不接平台、不读模型Key。精确候选／报告见实施记录。普通CLI／MCP／HTTP／停止及异路径运行仍单独验收，构建成功不能代替运行证明。原生许可、签名、GUI向导和三端发行仍未完成。

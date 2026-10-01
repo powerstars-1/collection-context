@@ -43,6 +43,9 @@ _METADATA_MEMBERS = frozenset(
         "top_level.txt",
         "namespace_packages.txt",
         "direct_url.json",
+        # uv's installation/cache bookkeeping is recognized but never read or
+        # copied into the license inventory (it is not a license or SBOM).
+        "uv_cache.json",
         "zip-safe",
     }
 )

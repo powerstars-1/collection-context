@@ -41,6 +41,20 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--workspace", type=Path, required=True, help="新产品工作目录；不是旧 Obsidian 库")
     result.add_argument("--runtime-dir", type=Path, help="显式库外运行依赖目录；无效时不回退系统工具")
     commands = result.add_subparsers(dest="command", required=True)
+    commands.add_parser("runtime-options", help="只看固定软件安装清单、大小和许可，不下载、不登录")
+    installation = commands.add_parser(
+        "install-runtime", help="明确确认后安装固定运行组件；不授予同步或计费权限"
+    )
+    installation.add_argument(
+        "--artifact", required=True, help="runtime-options 返回的固定安装项 id，不是 URL"
+    )
+    installation.add_argument("--confirm-install", action="store_true", help="确认下载及安装这一个软件组件")
+    runtime_probe = commands.add_parser(
+        "probe-runtime", help="明确启动新空白浏览器验证渲染，不访问抖音或模型"
+    )
+    runtime_probe.add_argument(
+        "--browser-dir", type=Path, required=True, help="不存在的新探测目录；拒绝借用已有登录态"
+    )
     commands.add_parser("init", help="只初始化新空目录，不覆盖已有文件")
     commands.add_parser("upgrade-writer", help="显式升级早期开发库写锁；保留资料，不自动清除旧占用")
     commands.add_parser("rebuild-index", help="显式重建派生索引，不调用模型")
@@ -223,7 +237,28 @@ def main(argv: list[str] | None = None) -> int:
     store = None
     secrets: CredentialBackend | None = None
     try:
-        if args.command == "init":
+        if args.command == "runtime-options":
+            from collection_context.application.runtime_setup import runtime_options
+
+            data = runtime_options()
+        elif args.command == "install-runtime":
+            from collection_context.application.runtime_setup import install_runtime
+
+            if args.runtime_dir is None:
+                raise ContextError("runtime_install_directory_required", "请明确指定库外的运行依赖目录。")
+            data = install_runtime(
+                args.runtime_dir,
+                library_dir=args.workspace,
+                artifact_id=args.artifact,
+                installation_confirmed=args.confirm_install,
+            )
+        elif args.command == "probe-runtime":
+            from collection_context.application.runtime_setup import probe_runtime
+
+            if args.runtime_dir is None:
+                raise ContextError("runtime_install_directory_required", "请明确指定库外的运行依赖目录。")
+            data = probe_runtime(args.runtime_dir, library_dir=args.workspace, browser_dir=args.browser_dir)
+        elif args.command == "init":
             store = LibraryStore.initialize(args.workspace)
             data = {"initialized": True, "auto_sync": False, "auto_process": False}
         else:

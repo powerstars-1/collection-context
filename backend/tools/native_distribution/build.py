@@ -13,13 +13,77 @@ import importlib.util
 import json
 import platform
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from importlib import metadata
 from pathlib import Path
 
-VERSIONS = {"pyinstaller": "6.22.3", "mcp": "2.2.0", "fastapi": "0.142.2", "uvicorn": "0.54.0"}
+VERSIONS = {
+    "pyinstaller": "6.22.3",
+    "mcp": "2.2.0",
+    "fastapi": "0.142.2",
+    "uvicorn": "0.54.0",
+    "playwright": "1.63.0",
+}
+
+
+def checked_browser_sdk() -> dict:
+    """Inspect only the fixed installed wheel; never install a browser or query caches.
+
+    The wheel's registered official sync_api hook collects its driver Node/JS:
+    https://github.com/microsoft/playwright-python/tree/main/playwright/_impl/__pyinstaller
+    Local browser installs inside that collected directory must not enter the
+    candidate, even if empty or linked. Reject contamination without deleting it.
+    """
+    distribution = metadata.distribution("playwright")
+    records = {str(path).replace("\\", "/") for path in distribution.files or ()}
+    driver = Path(distribution.locate_file("playwright/driver"))
+    if driver.is_symlink() or not driver.is_dir() or driver.parent.is_symlink():
+        raise ValueError("Playwright SDK driver directory must be real")
+    for relative in ("playwright/_impl", "playwright/_impl/__pyinstaller"):
+        directory = Path(distribution.locate_file(relative))
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError("Playwright SDK hook directory must be real")
+    if any(path.name == ".local-browsers" for path in driver.rglob("*")):
+        raise ValueError("Playwright SDK contains .local-browsers; use a clean build environment")
+    for path in driver.rglob("*"):
+        if path.is_symlink():
+            raise ValueError("Playwright SDK driver cannot contain links")
+        if not path.is_dir() and (
+            not path.is_file() or "playwright/driver/" + path.relative_to(driver).as_posix() not in records
+        ):
+            raise ValueError("Playwright SDK driver contains unregistered resources")
+    node_name = "node.exe" if sys.platform == "win32" else "node"
+    required = (
+        "playwright/driver/" + node_name,
+        "playwright/driver/package/cli.js",
+        "playwright/driver/package/browsers.json",
+        "playwright/driver/LICENSE",
+        "playwright/driver/package/LICENSE",
+        "playwright/driver/package/NOTICE",
+        "playwright/driver/package/ThirdPartyNotices.txt",
+        "playwright/_impl/__pyinstaller/hook-playwright.sync_api.py",
+        "playwright/_impl/__pyinstaller/__init__.py",
+    )
+    for relative in required:
+        path = Path(distribution.locate_file(relative))
+        if relative not in records or path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise ValueError("Playwright SDK driver/hook/license resources are incomplete")
+    node = driver / node_name
+    if sys.platform != "win32" and not node.stat().st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+        raise ValueError("Playwright SDK Node executable is not executable")
+    with node.open("rb") as stream:
+        node_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {
+        "package_version": VERSIONS["playwright"],
+        "driver_node_input_sha256": node_hash,
+        "collection": "official_playwright_sync_api_hook",
+        "browser_binaries_included": False,
+        "frozen_driver_execution_verified": False,
+        "license_closure": "unresolved",
+    }
 
 
 def validate_source(source: Path) -> None:
@@ -82,6 +146,9 @@ def freeze_command(stage: Path, source: Path, entry: Path, *, desktop: bool = Fa
         command.extend(["--collect-submodules", package])
     for package in ("fastapi", "mcp", "uvicorn"):
         command.extend(["--recursive-copy-metadata", package])
+    # Explicit import triggers Playwright's installed official hook, which
+    # collects its internal Node and JS assets. No host Node/cache is copied.
+    command.extend(["--hidden-import", "playwright.sync_api", "--copy-metadata", "playwright"])
     command.append(str(entry))
     return command
 
@@ -107,6 +174,7 @@ def build(output: Path, *, desktop: bool = False) -> dict:
     for package, expected in VERSIONS.items():
         if metadata.version(package) != expected:
             raise ValueError(f"Build dependency version mismatch: {package}")
+    browser_sdk = checked_browser_sdk()  # Reject before creating/copying any candidate.
     external.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="native-candidate-", dir=external))
     source = stage / "src" / "collection_context"
@@ -152,10 +220,11 @@ def build(output: Path, *, desktop: bool = False) -> dict:
         "architecture": platform.machine(),
         "python": platform.python_version(),
         "dependencies": VERSIONS,
+        "source_browser_sdk": browser_sdk,
         "requires_user_python_or_node": False,
-        "bundled_roles": ["cli", "stdio_mcp", "authenticated_http", "terminal_launcher"]
+        "bundled_roles": ["cli", "stdio_mcp", "authenticated_http", "terminal_launcher", "source_browser_sdk"]
         + (["desktop_picker"] if desktop else []),
-        "not_bundled": ["source_browser_runtime", "ffmpeg", "ocr_runtime_and_weights"],
+        "not_bundled": ["chromium_browser_runtime", "ffmpeg", "ocr_runtime_and_weights"],
         "developer_signed": False,
         "notarized": False,
         "tool_generated_ad_hoc_signature": sys.platform == "darwin",

@@ -97,6 +97,24 @@ def test_default_notice_uses_only_exact_product_path(collector, environment, tmp
     assert report["distribution_count"] == 1
 
 
+def test_uv_installation_bookkeeping_is_not_read_or_archived(collector, environment, tmp_path):
+    dist = next(environment[1].glob("*.dist-info"))
+    (dist / "uv_cache.json").write_bytes(b"synthetic-cache-path-not-for-license-export")
+    output = tmp_path / "out"
+    collect(collector, environment, output)
+    assert not list(output.rglob("uv_cache.json"))
+    assert all(b"synthetic-cache-path" not in p.read_bytes() for p in output.rglob("*") if p.is_file())
+
+
+def test_uv_bookkeeping_link_still_rejected(collector, environment, tmp_path):
+    dist = next(environment[1].glob("*.dist-info"))
+    outside = tmp_path / "outside"
+    outside.write_bytes(b"synthetic bookkeeping")
+    (dist / "uv_cache.json").symlink_to(outside)
+    with pytest.raises(collector.LicenseCollectionError):
+        collect(collector, environment, tmp_path / "out")
+
+
 @pytest.mark.parametrize(
     "name,version,directory",
     [

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -62,6 +64,9 @@ def test_desktop_freeze_preserves_separate_console_entry_and_mcp_metadata(tmp_pa
         assert "mcp.server" in command and "mcp.shared" in command and "mcp" in command
         assert "--onedir" in command and "--noupx" in command
         assert "--codesign-identity" not in command and "--argv-emulation" not in command
+        assert command[command.index("--hidden-import") + 1] == "playwright.sync_api"
+        assert command[command.index("--copy-metadata") + 1] == "playwright"
+        assert "--collect-all" not in command and "rapidocr" not in command
 
 
 @pytest.mark.parametrize("host", ["linux", "win32"])
@@ -127,3 +132,101 @@ def test_native_source_refuses_links_without_copying_their_targets(tmp_path, kin
     with pytest.raises(ValueError, match="links|real directory"):
         build_tool().validate_source(checked)
     assert marker.read_text(encoding="utf-8") == "# synthetic outside data"
+
+
+def browser_sdk_fixture(tmp_path, monkeypatch, tool, *, windows=False):
+    site = tmp_path / "isolated-site"
+    names = (
+        "playwright/driver/" + ("node.exe" if windows else "node"),
+        "playwright/driver/package/cli.js",
+        "playwright/driver/package/browsers.json",
+        "playwright/driver/LICENSE",
+        "playwright/driver/package/LICENSE",
+        "playwright/driver/package/NOTICE",
+        "playwright/driver/package/ThirdPartyNotices.txt",
+        "playwright/_impl/__pyinstaller/hook-playwright.sync_api.py",
+        "playwright/_impl/__pyinstaller/__init__.py",
+    )
+    for name in names:
+        path = site / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"original synthetic SDK fixture")
+        path.chmod(0o700)
+    distribution = SimpleNamespace(files=[Path(name) for name in names], locate_file=lambda p: site / p)
+    monkeypatch.setattr(tool.metadata, "distribution", lambda name: distribution)
+    return site, distribution
+
+
+@pytest.mark.parametrize("host", ["darwin", "linux", "win32"])
+def test_browser_sdk_checks_only_registered_wheel_resources(tmp_path, monkeypatch, host):
+    tool = build_tool()
+    monkeypatch.setattr(tool.sys, "platform", host)
+    browser_sdk_fixture(tmp_path, monkeypatch, tool, windows=host == "win32")
+    report = tool.checked_browser_sdk()
+    assert report == {
+        "package_version": "1.63.0",
+        "driver_node_input_sha256": hashlib.sha256(b"original synthetic SDK fixture").hexdigest(),
+        "collection": "official_playwright_sync_api_hook",
+        "browser_binaries_included": False,
+        "frozen_driver_execution_verified": False,
+        "license_closure": "unresolved",
+    }
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "broken_link"])
+def test_browser_sdk_rejects_local_browser_cache_without_removing(tmp_path, monkeypatch, kind):
+    tool = build_tool()
+    site, _ = browser_sdk_fixture(tmp_path, monkeypatch, tool)
+    cache = site / "playwright/driver/package/.local-browsers"
+    if kind == "directory":
+        cache.mkdir()
+    elif kind == "file":
+        cache.write_bytes(b"original browser marker")
+    else:
+        cache.symlink_to(tmp_path / "nonexistent-cache")
+    with pytest.raises(ValueError, match="local-browsers"):
+        tool.checked_browser_sdk()
+    assert cache.exists() or cache.is_symlink()
+
+
+@pytest.mark.parametrize("kind", ["link", "unregistered", "missing", "empty", "not_executable"])
+def test_browser_sdk_refuses_incomplete_or_contaminated_resources(tmp_path, monkeypatch, kind):
+    tool = build_tool()
+    monkeypatch.setattr(tool.sys, "platform", "darwin")
+    site, distribution = browser_sdk_fixture(tmp_path, monkeypatch, tool)
+    node = site / "playwright/driver/node"
+    if kind == "link":
+        link = site / "playwright/driver/package/linked"
+        link.symlink_to(tmp_path / "outside")
+    elif kind == "unregistered":
+        (site / "playwright/driver/private.json").write_bytes(b"synthetic marker")
+    elif kind == "missing":
+        distribution.files = [
+            name for name in distribution.files if name.as_posix() != "playwright/driver/node"
+        ]
+    elif kind == "empty":
+        node.write_bytes(b"")
+    else:
+        node.chmod(0o600)
+    with pytest.raises(ValueError):
+        tool.checked_browser_sdk()
+
+
+def test_contaminated_browser_sdk_fails_before_output_or_freeze(tmp_path, monkeypatch):
+    tool = build_tool()
+    site, _ = browser_sdk_fixture(tmp_path, monkeypatch, tool)
+    (site / "playwright/driver/package/.local-browsers").mkdir()
+    monkeypatch.setattr(tool.metadata, "version", lambda package: tool.VERSIONS[package])
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **kw: pytest.fail("must not freeze"))
+    output = tmp_path / "candidate"
+    with pytest.raises(ValueError, match="local-browsers"):
+        tool.build(output)
+    assert not output.exists()
+
+
+def test_playwright_direct_pin_is_declared_and_ocr_not_added():
+    tool = build_tool()
+    requirements = Path(__file__).parents[1] / "tools/native_distribution/requirements-build.in"
+    assert tool.VERSIONS["playwright"] == "1.63.0"
+    assert "playwright==1.63.0" in requirements.read_text(encoding="utf-8")
+    assert "rapidocr" not in tool.VERSIONS and "onnxruntime" not in tool.VERSIONS

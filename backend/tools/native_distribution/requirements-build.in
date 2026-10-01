@@ -1,5 +1,7 @@
-# Current macOS ARM64 development build. No browser or OCR runtime is installed.
+# Current macOS ARM64 development build. Playwright SDK includes internal Node/JS,
+# not Chromium browser binaries. No OCR runtime or weights are bundled.
 pyinstaller==6.22.3
 mcp==2.2.0
 fastapi==0.142.2
 uvicorn==0.54.0
+playwright==1.63.0
