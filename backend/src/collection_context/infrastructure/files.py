@@ -1,4 +1,4 @@
-"""Descriptor-anchored file access. Windows backend is an explicit pending adapter."""
+"""Descriptor-anchored file access with fail-closed platform detection."""
 
 from __future__ import annotations
 
@@ -8,13 +8,13 @@ import uuid
 from pathlib import Path
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.platform_safety import require_safe_files_runtime
 
 
 class SafeFiles:
     def __init__(self, root: Path):
         self.root = root.absolute()
-        if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
-            raise ContextError("unsupported_platform", "本适配器尚未通过 Windows 文件安全验收。")
+        require_safe_files_runtime()
         try:
             self.fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             info = os.fstat(self.fd)
@@ -70,6 +70,8 @@ class SafeFiles:
             raise ContextError("forbidden_path", "目录不可访问或包含链接。") from None
 
     def read(self, relative: str, *, max_bytes: int = 16_000_000, private: bool = False) -> bytes:
+        if type(max_bytes) is not int or max_bytes < 0:
+            raise ContextError("invalid_argument", "读取大小上限无效。")
         parent, name = self._parent(relative)
         try:
             fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
@@ -81,10 +83,25 @@ class SafeFiles:
                     raise ContextError("unsafe_secret_permissions", "凭据文件须仅允许当前运行用户访问。")
                 result = stream.read(max_bytes + 1)
                 after = os.fstat(stream.fileno())
-                if len(result) > max_bytes or (before.st_size, before.st_mtime_ns) != (
+                before_version = (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_mode,
+                    before.st_nlink,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                after_version = (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_mode,
+                    after.st_nlink,
                     after.st_size,
                     after.st_mtime_ns,
-                ):
+                    after.st_ctime_ns,
+                )
+                if len(result) > max_bytes or before_version != after_version:
                     raise ContextError("version_changed", "读取时内容发生变化，请重新读取。", retryable=True)
                 return result
         except FileNotFoundError:
@@ -96,27 +113,42 @@ class SafeFiles:
 
     def write(self, relative: str, data: bytes, *, replace: bool = False) -> None:
         parent, name = self._parent(relative, create=True)
-        temp = ".tmp-" + uuid.uuid4().hex if replace else name
+        temp = ".tmp-" + uuid.uuid4().hex
         try:
             fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(data)
                 stream.flush()
                 os.fsync(stream.fileno())
+            self.check_root()
             if replace:
-                self.check_root()
                 os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+            else:
+                # A same-directory hard-link publication is no-clobber and atomic.
+                # The temporary name is removed immediately; readers reject the
+                # short two-link interval and any crash residue instead of seeing
+                # a partial target.
+                os.link(
+                    temp,
+                    name,
+                    src_dir_fd=parent,
+                    dst_dir_fd=parent,
+                    follow_symlinks=False,
+                )
+                os.unlink(temp, dir_fd=parent)
             os.fsync(parent)
         except FileExistsError:
             raise ContextError("write_conflict", "目标已存在，未覆盖原文件。") from None
         except OSError:
             raise ContextError("storage_unavailable", "写入未完成，请检查磁盘与权限。") from None
         finally:
-            if replace:
-                try:
-                    os.unlink(temp, dir_fd=parent)
-                except FileNotFoundError:
-                    pass
+            try:
+                os.unlink(temp, dir_fd=parent)
+            except OSError:
+                # Preserve the primary failure.  If publication linked the
+                # target but cleanup was interrupted, nlink remains >1 and
+                # SafeFiles.read fails closed until an operator repairs it.
+                pass
             os.close(parent)
 
     def unlink(self, relative: str) -> None:

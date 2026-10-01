@@ -11,6 +11,7 @@ from pathlib import Path
 
 from collection_context.application.contracts import ContextError, canonical_bytes, utc_now
 from collection_context.infrastructure.files import SafeFiles
+from collection_context.infrastructure.platform_safety import require_ownership_runtime
 
 
 class _FileLease:
@@ -27,6 +28,7 @@ class _FileLease:
         self.nonce = "e_" + uuid.uuid4().hex
         self.body = canonical_bytes({"nonce": self.nonce, "pid": os.getpid(), **(metadata or {})})
         try:
+            require_ownership_runtime()
             import fcntl
 
             self.lock_api = fcntl
@@ -53,9 +55,6 @@ class _FileLease:
             finally:
                 os.close(parent)
             self.check()
-        except ImportError:
-            self.close()
-            raise ContextError("unsupported_platform", "Windows 操作系统所有权适配尚未验收。") from None
         except OSError:
             self.close()
             raise ContextError(self.unavailable, f"无法安全取得{self.label}所有权。") from None
