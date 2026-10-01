@@ -72,3 +72,20 @@ collection-context --workspace /absolute/new-library --runtime-dir /absolute/pro
 `runtime_smoke.py --binary <明确控制台> --runtime <已验证安装目录> --output <不存在的新库外目录>` 已以新HOME／空PATH验证原生包内驱动、浏览器本机渲染／退出及收据不变；不下载、不接平台、不读模型Key。精确候选／报告见实施记录。普通CLI／MCP／HTTP／停止及异路径运行仍单独验收，构建成功不能代替运行证明。原生许可、签名、全部组件的桌面安装与三端发行仍未完成。
 
 可见候选使用上述脚本的显式 `--headed`，报告为 `frozen_headed_local_fixture_only`，不能用headless结果充当该项通过。Chrome for Testing归档固定完整hash，五个framework相对链接名称／目标均须精确匹配并留在普通节点构成的本代树内；泛用资料读取、其他归档及可执行文件路径仍拒绝链接。保留ABOUT、Widevine许可和内置credits／terms，不修改签名、不移除quarantine、不绕过系统安全保护。每次使用重验主执行文件与已知五个链接，但不声称完整资源树每次重新hash。
+
+## 媒体工具的自有构建候选（尚未加入安装器）
+
+现成Mac ARM64配对制品实测缺少PNG编码器，不能拿版本探测冒充选帧通过。新增开发者工具 `ffmpeg_source_build.py`：只构建固定FFmpeg9.0.2官方源码，先校验固定SHA256与官方主签名指纹，再在新库外目录编译；脚本不下载、不装包、不写系统目录、不发布、不改产品runtime。仅Mac ARM64开发构建有实际证据，不要求普通用户自行编译，也不声明Windows/Linux已支持。[官方源码与签名指导](https://ffmpeg.org/download.html)。
+
+PGPy0.6.0只存在于本次独立验证环境，不加入产品依赖或原生环境；本次验证依赖另有cryptography50.0.2、cffi2.1.1、pyasn10.6.4、pycparser3.0。验证范围是固定官方主指纹下的分离签名密码学校验，PGPy的自签／撤销／flags检查警告明确保留；完整证书撤销/过期审查及PQ签名未通过，不用该结果冒充所有供应链条件关闭。
+
+构建禁自动探测第三方库、GPL、nonfree、version3、网络与共享FFmpeg库；启用系统zlib，保留独立命名的FFmpeg／FFprobe及原LICENSE.md／COPYING.LGPLv2.1／完整签名验证过的源码快照、configure与make日志。用当前AppleSDK编译，目标macOS14，实际只在本机系统验证；不链接进Python后端、不安装Homebrew包、不替换旧工具。发布前还须完成可分发配对包、构建/源码对应材料、许可提示与三端运行。[官方许可检查单](https://ffmpeg.org/legal.html)。
+
+开发者显式示例，全部输入输出须为绝对路径，输出须不存在；用户发行版不会要求运行以下步骤：
+
+```bash
+python ffmpeg_source_build.py --archive /absolute/ffmpeg-9.0.2.tar.xz --signature /absolute/ffmpeg-9.0.2.tar.xz.asc --key-file /absolute/ffmpeg-devel.asc --output /absolute/new-build
+python ffmpeg_probe.py --ffmpeg /absolute/new-build/artifacts/ffmpeg --ffprobe /absolute/new-build/artifacts/ffprobe --output /absolute/new-probe
+```
+
+后一探测只生成原创RGB页面和音频，实测同一自有LocalMedia的音轨分段、扫描、选择、PNG输出，并查动态依赖。成功仅为该制品的本机软件能力证据，不证明抖音H264／HEVC全场景、真实识别精度、冻结后台、GUI安装或新手体验。实际候选hash与报告位置见实施记录。
