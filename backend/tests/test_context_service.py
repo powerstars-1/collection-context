@@ -40,13 +40,11 @@ def error(code, operation):
     assert caught.value.code == code
 
 
-def test_search_explicit_index_rebuild_and_no_write(library):
+def test_search_uses_automatically_maintained_index_and_does_not_write(library):
     item = add(library)
     save(library, item)
     service = ContextService(library)
     before = library.snapshot()
-    error("index_unavailable", lambda: service.search("UI"))
-    assert FileIndex(library).rebuild()["indexed_items"] == 1
     result = service.search("UI 1024")
     assert result["total_matches"] == 1
     assert result["items"][0]["material_ref"] == item["id"]
@@ -65,15 +63,13 @@ def test_job_updates_do_not_invalidate_index(library):
     assert ContextService(library).search("UI")["total_matches"] == 1
 
 
-def test_metadata_changes_require_reindex_and_no_stale_artifacts(library):
+def test_metadata_changes_automatically_reindex_and_hide_stale_artifacts(library):
     item = add(library)
     save(library, item)
     index = FileIndex(library)
     index.rebuild()
     add(library, title="新标题")
     service = ContextService(library)
-    error("index_outdated", lambda: service.search("Tailwind"))
-    index.rebuild()
     assert service.search("Tailwind")["total_matches"] == 0
     read = service.read(item["id"], artifact="screen")
     assert read["state"] == "stale" and read["warnings"]

@@ -106,6 +106,27 @@ class LibraryStore:
                 "settings": {"auto_sync": False, "auto_process": False},
             }
             cls._publish(files, state)
+            # Seed an empty derived index without acquiring a runtime writer lease. This avoids
+            # leaving writer diagnostics in a just-created library while making empty search safe.
+            from collection_context.library.index import INDEX_VERSION, library_version
+
+            index = canonical_bytes(
+                {
+                    "schema_version": INDEX_VERSION,
+                    "workspace_id": workspace_id,
+                    "library_version": library_version(state),
+                    "documents": {},
+                    "gaps": [],
+                }
+            )
+            index_version = "x_" + uuid.uuid4().hex
+            files.write(f".context/索引/{index_version}.json", index)
+            files.write(
+                ".context/索引/CURRENT.json",
+                canonical_bytes(
+                    {"version": index_version, "sha256": hashlib.sha256(index).hexdigest()}
+                ),
+            )
         return cls(root)
 
     @staticmethod
@@ -214,10 +235,24 @@ class LibraryStore:
     def transact(self, mutation: Callable[[dict[str, Any]], Any]) -> Any:
         with self.writer() as owner:
             state = self.snapshot()
+            from collection_context.library.index import FileIndex, library_version
+
+            before_library_version = library_version(state)
             result = mutation(state)
             self._check_writer(owner)
             state["generation"] += 1
             self._publish(self.files, state, before_commit=lambda: self._check_writer(owner))
+            if library_version(state) != before_library_version:
+                try:
+                    FileIndex(self).rebuild_committed(state, owner)
+                except ContextError as error:
+                    if error.code in {"lock_changed", "writer_busy"}:
+                        raise
+                    raise ContextError(
+                        "index_maintenance_failed",
+                        f"资料已提交，但索引维护失败（{error.code}）；请勿重复提交资料。",
+                        next_action="运行显式索引重建后再搜索。",
+                    ) from error
             return copy.deepcopy(result)
 
     def upsert(
