@@ -53,7 +53,11 @@ def exercise(binary: Path, output: Path) -> dict:
     }
     try:
         options = helper.run(binary, [*common, "runtime-options"], stage=stage, environment=environment)
-        media = [item for item in options["artifacts"] if item.get("delivery") == "bundled"]
+        media = [
+            item
+            for item in options["artifacts"]
+            if item["id"].startswith("ffmpeg-") and item.get("delivery") == "bundled"
+        ]
         assert len(media) == 1 and media[0]["state"] == "available"
         assert media[0]["download_bytes"] == 0
         installation = helper.run(

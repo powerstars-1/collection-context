@@ -164,6 +164,40 @@ def test_unknown_text_or_credentials_not_copied(collector, environment, tmp_path
     assert not output.exists()
 
 
+@pytest.mark.parametrize("kind", ["good", "wrong_hash", "wrong_size", "wrong_version", "linked"])
+def test_explicit_extra_notice_is_exact_and_does_not_allow_generic_missing(
+    collector, environment, tmp_path, kind
+):
+    root, site = environment
+    notice = site / "original_component-1.2.3.dist-info/licenses/LICENSE"
+    original = notice.read_bytes()
+    notice.unlink()
+    extra = tmp_path / "exact-original-notice"
+    extra.write_bytes(original)
+    if kind == "linked":
+        link = tmp_path / "linked-notice"
+        link.symlink_to(extra)
+        extra = link
+    entries = {
+        ("original-component", "wrong" if kind == "wrong_version" else "1.2.3"): [
+            (
+                extra,
+                len(original) + (1 if kind == "wrong_size" else 0),
+                "0" * 64 if kind == "wrong_hash" else hashlib.sha256(original).hexdigest(),
+            )
+        ]
+    }
+    output = tmp_path / "output"
+    if kind == "good":
+        report = collector.collect_licenses(root, output, collector.FRONTEND_NOTICE, extra_notices=entries)
+        assert report["native_license_closure"] == "unresolved"
+        assert (output / "components/original-component/1.2.3/upstream/LICENSE").read_bytes() == original
+    else:
+        with pytest.raises(collector.LicenseCollectionError):
+            collector.collect_licenses(root, output, collector.FRONTEND_NOTICE, extra_notices=entries)
+        assert not output.exists()
+
+
 def test_missing_license_fails_before_output_creation(collector, environment, tmp_path):
     dist = next(environment[1].glob("*.dist-info"))
     (dist / "licenses/LICENSE").unlink()

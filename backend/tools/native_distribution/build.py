@@ -113,7 +113,9 @@ def checked_output(output: Path, repository: Path) -> Path:
     return resolved
 
 
-def freeze_command(stage: Path, source: Path, entry: Path, *, desktop: bool = False) -> list[str]:
+def freeze_command(
+    stage: Path, source: Path, entry: Path, *, desktop: bool = False, ocr: bool = False
+) -> list[str]:
     """Fixed modes only: the console companion is retained for stdio AI clients."""
     if desktop and sys.platform != "darwin":
         raise ValueError("Desktop application packaging is only verified on the current Mac candidate")
@@ -152,11 +154,18 @@ def freeze_command(stage: Path, source: Path, entry: Path, *, desktop: bool = Fa
     # Explicit import triggers Playwright's installed official hook, which
     # collects its internal Node and JS assets. No host Node/cache is copied.
     command.extend(["--hidden-import", "playwright.sync_api", "--copy-metadata", "playwright"])
+    if ocr:
+        # Only fixed YAML metadata, never the wheel's implicit models directory.
+        for name in ("config.yaml", "default_models.yaml"):
+            command.extend(["--add-data", str(stage / "ocr_metadata" / name) + ":rapidocr"])
+        command.extend(["--collect-submodules", "rapidocr", "--collect-binaries", "onnxruntime"])
+        for name in ("rapidocr", "onnxruntime"):
+            command.extend(["--copy-metadata", name])
     command.append(str(entry))
     return command
 
 
-def license_inventory(stage: Path) -> dict:
+def license_inventory(stage: Path, *, ocr_notices: Path | None = None) -> dict:
     """Read only the explicit build environment; keep native closure unresolved."""
     helper = Path(__file__).with_name("licenses.py")
     if helper.is_symlink() or not helper.is_file():
@@ -166,7 +175,43 @@ def license_inventory(stage: Path) -> dict:
         raise ValueError("License inventory helper could not be loaded")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.collect_licenses(Path(sys.prefix).absolute(), stage / "licenses")
+    extras = {}
+    if ocr_notices is not None:
+        extras = {
+            ("rapidocr", "3.9.2"): [
+                (
+                    ocr_notices / "RapidOCR-LICENSE",
+                    11_422,
+                    "3e0af25fdd06aa9586ae97adb00ea927ebe5a3805ac77d2d3a81ce5f55693333",
+                )
+            ],
+            ("flatbuffers", "25.12.19"): [
+                (
+                    ocr_notices / "flatbuffers-LICENSE",
+                    11_358,
+                    "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+                )
+            ],
+            ("antlr4-python3-runtime", "4.9.3"): [
+                (
+                    ocr_notices / "antlr4-LICENSE",
+                    2699,
+                    "b1b379fcaf3219593a4c433feb1b35c780bed23fafaae440b1ae2771a9521e3a",
+                )
+            ],
+            ("onnxruntime", "1.30.0"): [
+                (Path(metadata.distribution("onnxruntime").locate_file("onnxruntime/" + name)), size, digest)
+                for name, size, digest in (
+                    ("LICENSE", 1073, "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"),
+                    (
+                        "ThirdPartyNotices.txt",
+                        338088,
+                        "143764b952fdb1a7c69ce653bfba74a7744d6a8a573bfb73e235fba356c83de3",
+                    ),
+                )
+            ],
+        }
+    return module.collect_licenses(Path(sys.prefix).absolute(), stage / "licenses", extra_notices=extras)
 
 
 def media_identity() -> dict:
@@ -200,7 +245,36 @@ def media_identity() -> dict:
 
 
 def checked_media_package(path: Path) -> dict:
-    identity = media_identity()
+    return checked_component_package(path, media_identity())
+
+
+def ocr_identity() -> dict:
+    path = Path(__file__).resolve().parents[2] / "src/collection_context/infrastructure/runtime_ocr_layout.py"
+    if path.is_symlink() or path.stat().st_size > 32_000:
+        raise ValueError("Expected fixed bounded OCR catalog")
+    values = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if node.targets[0].id in {"OCR_ID", "OCR_BYTES", "OCR_SHA256"}:
+                values[node.targets[0].id] = ast.literal_eval(node.value)
+    if (
+        set(values) != {"OCR_ID", "OCR_BYTES", "OCR_SHA256"}
+        or not isinstance(values["OCR_ID"], str)
+        or "/" in values["OCR_ID"]
+        or type(values["OCR_BYTES"]) is not int
+        or not 0 < values["OCR_BYTES"] < 128_000_000
+        or not isinstance(values["OCR_SHA256"], str)
+        or len(values["OCR_SHA256"]) != 64
+    ):
+        raise ValueError("Fixed OCR identity is incomplete")
+    return {
+        "filename": values["OCR_ID"] + ".zip",
+        "bytes": values["OCR_BYTES"],
+        "sha256": values["OCR_SHA256"],
+    }
+
+
+def checked_component_package(path: Path, identity: dict) -> dict:
     if not path.is_absolute() or ".." in path.parts or any(p.is_symlink() for p in (path, *path.parents)):
         raise ValueError("Media component must be an explicit ordinary file")
     before = path.stat()
@@ -213,7 +287,45 @@ def checked_media_package(path: Path) -> dict:
     return identity
 
 
-def build(output: Path, *, desktop: bool = False, media_package: Path | None = None) -> dict:
+def checked_ocr_metadata() -> dict[str, bytes]:
+    for name, expected in {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"}.items():
+        if metadata.version(name) != expected:
+            raise ValueError("Fixed OCR runtime version differs")
+    distribution = metadata.distribution("rapidocr")
+    records = {str(path).replace("\\", "/") for path in distribution.files or ()}
+    result = {}
+    for name in ("config.yaml", "default_models.yaml"):
+        relative = "rapidocr/" + name
+        path = Path(distribution.locate_file(relative))
+        if (
+            relative not in records
+            or any(p.is_symlink() for p in (path, *path.parents))
+            or not path.is_file()
+            or path.stat().st_nlink != 1
+            or not 0 < path.stat().st_size < 128_000
+        ):
+            raise ValueError("OCR metadata must be fixed ordinary wheel resources")
+        result[name] = path.read_bytes()
+    if hashlib.sha256(result["default_models.yaml"]).hexdigest() != (
+        "db47df9d6b071721f1633667b41cfef1e40b5d7f09be030aaea8be801ca2f2f5"
+    ):
+        raise ValueError("OCR model metadata identity differs")
+    if (
+        hashlib.sha256(result["config.yaml"]).hexdigest()
+        != "06623941e188461a0bc263fe16175cb5e5f6f6b01f4387e546d3a741569fc021"
+    ):
+        raise ValueError("OCR engine configuration identity differs")
+    return result
+
+
+def build(
+    output: Path,
+    *,
+    desktop: bool = False,
+    media_package: Path | None = None,
+    ocr_package: Path | None = None,
+    ocr_notices: Path | None = None,
+) -> dict:
     root = Path(__file__).resolve().parents[2]
     external = checked_output(output, root.parent.resolve())
     if desktop and sys.platform != "darwin":
@@ -223,6 +335,10 @@ def build(output: Path, *, desktop: bool = False, media_package: Path | None = N
             raise ValueError(f"Build dependency version mismatch: {package}")
     browser_sdk = checked_browser_sdk()  # Reject before creating/copying any candidate.
     media = checked_media_package(media_package) if media_package is not None else None
+    ocr = checked_component_package(ocr_package, ocr_identity()) if ocr_package is not None else None
+    ocr_metadata = checked_ocr_metadata() if ocr is not None else {}
+    if ocr is not None and ocr_notices is None:
+        raise ValueError("OCR candidate requires explicit original upstream license inputs")
     external.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix="native-candidate-", dir=external))
     source = stage / "src" / "collection_context"
@@ -235,24 +351,35 @@ def build(output: Path, *, desktop: bool = False, media_package: Path | None = N
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     validate_source(source)
-    if media is not None:
-        assert media_package is not None
+    if media is not None or ocr is not None:
         software = stage / "native_software"
         software.mkdir(mode=0o700)
-        snapshot = software / media["filename"]
-        shutil.copyfile(media_package, snapshot)
-        snapshot.chmod(0o600)
-        checked_media_package(snapshot)  # Input changes cannot enter the frozen candidate.
-    licenses = license_inventory(stage)
+        for original_package, identity in ((media_package, media), (ocr_package, ocr)):
+            if identity is not None:
+                assert original_package is not None
+                snapshot = software / identity["filename"]
+                shutil.copyfile(original_package, snapshot)
+                snapshot.chmod(0o600)
+                checked_component_package(snapshot, identity)
+    if ocr_metadata:
+        directory = stage / "ocr_metadata"
+        directory.mkdir(mode=0o700)
+        for name, body in ocr_metadata.items():
+            (directory / name).write_bytes(body)
+    licenses = license_inventory(stage, ocr_notices=ocr_notices)
     entry = stage / "entry.py"
     shutil.copy2(Path(__file__).with_name("entry.py"), entry)
-    command = freeze_command(stage, source, entry)
+    command = freeze_command(stage, source, entry, ocr=ocr is not None)
     subprocess.run(command, cwd=stage, check=True)
     desktop_bundle = None
     if desktop:
         desktop_entry = stage / "desktop_entry.py"
         shutil.copy2(Path(__file__).with_name("desktop_entry.py"), desktop_entry)
-        subprocess.run(freeze_command(stage, source, desktop_entry, desktop=True), cwd=stage, check=True)
+        subprocess.run(
+            freeze_command(stage, source, desktop_entry, desktop=True, ocr=ocr is not None),
+            cwd=stage,
+            check=True,
+        )
         desktop_bundle = stage / "dist" / "CollectionContextDesktop.app"
         if not desktop_bundle.is_dir():
             raise ValueError("Desktop bundle was not created")
@@ -262,6 +389,8 @@ def build(output: Path, *, desktop: bool = False, media_package: Path | None = N
         / "CollectionContext"
         / ("CollectionContext.exe" if sys.platform == "win32" else "CollectionContext")
     )
+    if ocr is not None and any((stage / "dist").rglob("*.onnx")):
+        raise ValueError("Implicit OCR wheel weights entered the candidate; explicit installation required")
     return {
         "stage": str(stage),
         "binary": str(binary),
@@ -290,7 +419,20 @@ def build(output: Path, *, desktop: bool = False, media_package: Path | None = N
             if media is not None
             else None
         ),
-        "not_bundled": ["chromium_browser_runtime", "ocr_runtime_and_weights"]
+        "ocr_component": (
+            {
+                **ocr,
+                "delivery": "bundled_archive_explicit_installation",
+                "functional_verified": False,
+                "engine_versions": {"rapidocr": "3.9.2", "onnxruntime": "1.30.0"},
+                "implicit_wheel_weights_included": False,
+                "license_closure": "unresolved",
+            }
+            if ocr is not None
+            else None
+        ),
+        "not_bundled": ["chromium_browser_runtime"]
+        + ([] if ocr is not None else ["ocr_runtime_and_weights"])
         + ([] if media is not None else ["ffmpeg"]),
         "developer_signed": False,
         "notarized": False,
@@ -307,8 +449,16 @@ def main() -> int:
         "--desktop-app", action="store_true", help="本机Mac开发候选 .app；同时保留console程序"
     )
     parser.add_argument("--media-package", type=Path, help="仅接受编译固定hash的媒体组件包，不接受任意归档")
+    parser.add_argument("--ocr-package", type=Path, help="仅接受固定hash的OCR权重包及固定CPU运行库")
+    parser.add_argument("--ocr-notices", type=Path, help="仅接收固定hash的原始上游许可目录")
     args = parser.parse_args()
-    report = build(args.output, desktop=args.desktop_app, media_package=args.media_package)
+    report = build(
+        args.output,
+        desktop=args.desktop_app,
+        media_package=args.media_package,
+        ocr_package=args.ocr_package,
+        ocr_notices=args.ocr_notices,
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     Path(report["stage"], "build-report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

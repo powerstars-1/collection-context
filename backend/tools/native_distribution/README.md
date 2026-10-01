@@ -111,7 +111,7 @@ CollectionContext cli --workspace /absolute/absent-library --runtime-dir /absolu
 
 `runtime_ocr.py` 固定RapidOCR3.9.2／ONNX Runtime1.30.0 CPU及三权重hash；读取收据匹配的快照，期间版本改变则拒绝，将快照放在已与资料库隔离的运行目录中，初始化内存session后清理临时副本。模型不从默认缓存、其他项目目录或网络替代。安装成功仍只报告静态校验，不自动启用识别或云请求。
 
-开发者从固定wheel生成七成员普通ZIP，保留上游模型索引、RapidOCR与PaddleOCR原许可及明确的未完成再分发审查。权重来源hash与wheel RECORD及上游版本索引一致，不冒充上游数字签名验证。现有原生构建尚未携带OCR运行库／该归档；清单条件缺失时不可安装。`build.py`的OCR原生封装、无需Python的真实加载和三端包仍待实现，不能用开发环境结果代替。
+开发者从固定wheel生成七成员普通ZIP，保留上游模型索引、RapidOCR与PaddleOCR原许可及明确的未完成再分发审查。权重来源hash与wheel RECORD及上游版本索引一致，不冒充上游数字签名验证。`build.py --ocr-package /absolute/fixed-component.zip --ocr-notices /absolute/fixed-original-notices`现已封装固定CPU运行库和独立权重归档；仅复制固定config/default_models两个YAML，不隐式复制wheel的models目录，构建后再次拒绝散落ONNX权重。Mac独立进程真实验证通过，Windows／Linux未验证。
 
 以下是开发者源码验证，不是新用户安装教程；输出都必须新建在仓库外：
 
@@ -124,3 +124,7 @@ PYTHONPATH=src python tools/native_distribution/ocr_runtime_smoke.py \
 ```
 
 后者通过同一安装器实际安装固定权重，加载真实CPU session并识别六张原创中英文页；对Python socket连接／DNS进行拒绝审计，不借用户模型Key、来源登录或资料库。测试字体只用于开发者生成样例，不进入产品包。关键词命中不是全文字符准确率，也不代表真实视频、GPU、服务器资源约束或其他系统已验收。
+
+原生验证用 `ocr_native_smoke.py --binary /absolute/CollectionContext --output /absolute/new-stage --font /absolute/ordinary-developer-fixture-font`。开发者生成原创900×650的六页，冻结子进程从新HOME／空PATH运行固定权重安装和 `probe-ocr-runtime --probe-dir /absolute/new-probe --image-dir /absolute/original-pages`。字体只属于测试生成环节，产品不需要本机Python／Node／字体。探测输入、输出、资料库和runtime两两分离，固定页名／尺寸／读取上限，输出不覆盖；拒绝联网，报告保留原始识别文本、缺词及失败原因。该工具没有恢复真实抖音登录或云模型授权。
+
+原始许可补充输入为固定hash的RapidOCR v3.9.2、FlatBuffers v25.12.19、ANTLR4 v4.9.3文本；ONNX Runtime1.30.0的LICENSE／ThirdPartyNotices由固定wheel包目录读取。统一许可收集器仍拒绝其他未知文件／身份不符，不把缺文本当许可已通过。收集到文字不等于原生依赖和权重公开再分发许可已闭合。

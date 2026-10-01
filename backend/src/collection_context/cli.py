@@ -62,6 +62,9 @@ def parser() -> argparse.ArgumentParser:
         "probe-media-runtime", help="用原创本机样例验证已安装的媒体组件，不调用模型或来源"
     )
     media_probe.add_argument("--probe-dir", type=Path, required=True, help="不存在的新探测目录，须在库外")
+    ocr_probe = commands.add_parser("probe-ocr-runtime", help="对明确提供的六张原创测试页做本机OCR，不联网")
+    ocr_probe.add_argument("--probe-dir", type=Path, required=True)
+    ocr_probe.add_argument("--image-dir", type=Path, required=True, help="库外的固定原创测试页目录")
     commands.add_parser("init", help="只初始化新空目录，不覆盖已有文件")
     commands.add_parser("upgrade-writer", help="显式升级早期开发库写锁；保留资料，不自动清除旧占用")
     commands.add_parser("rebuild-index", help="显式重建派生索引，不调用模型")
@@ -276,6 +279,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.runtime_dir is None:
                 raise ContextError("runtime_install_directory_required", "请明确指定库外的运行依赖目录。")
             data = probe_media_runtime(args.runtime_dir, library_dir=args.workspace, probe_dir=args.probe_dir)
+        elif args.command == "probe-ocr-runtime":
+            from collection_context.application.runtime_ocr_probe import probe_ocr_runtime
+
+            if args.runtime_dir is None:
+                raise ContextError("runtime_install_directory_required", "请明确指定库外的运行依赖目录。")
+            data = probe_ocr_runtime(
+                args.runtime_dir,
+                library_dir=args.workspace,
+                probe_dir=args.probe_dir,
+                image_dir=args.image_dir,
+            )
         elif args.command == "init":
             store = LibraryStore.initialize(args.workspace)
             data = {"initialized": True, "auto_sync": False, "auto_process": False}

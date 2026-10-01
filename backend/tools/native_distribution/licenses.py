@@ -29,7 +29,8 @@ _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _VERSION = re.compile(r"[0-9][A-Za-z0-9._+!-]{0,79}\Z")
 _LICENSE_FILE = re.compile(
     r"(?:LICENSE|LICENCE|COPYING|NOTICE|AUTHORS|COPYRIGHT)"
-    r"(?:\.(?:txt|md|rst|APACHE|BSD|MIT|GPL|LGPL|PSF|ZLIB))?\Z",
+    r"(?:\.(?:txt|md|rst|APACHE|BSD|MIT|GPL|LGPL|PSF|ZLIB))?\Z"
+    r"|(?:LICENSE-3RD-PARTY\.txt|LICENSE_GEOS|dragon4_LICENSE\.txt|ThirdPartyNotices\.txt)\Z",
     re.IGNORECASE,
 )
 _METADATA_MEMBERS = frozenset(
@@ -46,6 +47,7 @@ _METADATA_MEMBERS = frozenset(
         # uv's installation/cache bookkeeping is recognized but never read or
         # copied into the license inventory (it is not a license or SBOM).
         "uv_cache.json",
+        "uv_build.json",
         "zip-safe",
     }
 )
@@ -55,6 +57,7 @@ _SBOM_MEMBERS = frozenset(
         "rpds-py.cyclonedx.json",
         "pydantic-core.cyclonedx.json",
         "cryptography-rust.cyclonedx.json",
+        "pillow-12.3.0.cdx.json",
     }
 )
 _CREDENTIAL_TEXT = re.compile(
@@ -185,7 +188,7 @@ def _license_members(distribution: Path) -> list[Path]:
                         raise LicenseCollectionError("license_member_limit")
                     _safe_path(entry)
                     if entry.is_dir():
-                        if not _NAME.fullmatch(entry.name):
+                        if not _NAME.fullmatch(entry.name) and entry.name != "_core":
                             raise LicenseCollectionError("unknown_license_member")
                         pending.append(entry)
                     elif _LICENSE_FILE.fullmatch(entry.name):
@@ -222,7 +225,13 @@ def _output(output: Path, environment: Path) -> Path:
     return output
 
 
-def collect_licenses(environment_dir: Path, output_dir: Path, frontend_notice: Path | None = None) -> dict:
+def collect_licenses(
+    environment_dir: Path,
+    output_dir: Path,
+    frontend_notice: Path | None = None,
+    *,
+    extra_notices: dict[tuple[str, str], list[tuple[Path, int, str]]] | None = None,
+) -> dict:
     """Copy exact approved source texts into a new/empty external output.
 
     Returns a report with index_path, counts and unresolved closure. The index
@@ -275,13 +284,34 @@ def collect_licenses(environment_dir: Path, output_dir: Path, frontend_notice: P
                 raise LicenseCollectionError("duplicate_component_name")
             names.add(canonical_name)
             records = []
-            for path in _license_members(directory):
+            try:
+                members = _license_members(directory)
+            except LicenseCollectionError as error:
+                if error.code != "missing_license_text" or not (extra_notices or {}).get(
+                    (canonical_name, version)
+                ):
+                    raise
+                members = []
+            approved = []
+            for path, expected_size, expected_hash in (extra_notices or {}).get(
+                (canonical_name, version), []
+            ):
                 data = _license_text(path)
+                if len(data) != expected_size or hashlib.sha256(data).hexdigest() != expected_hash:
+                    raise LicenseCollectionError("extra_notice_identity")
+                approved.append(
+                    (
+                        Path("upstream")
+                        / ("LICENSE" if len(approved) == 0 else f"NOTICE-{len(approved)}.txt"),
+                        data,
+                    )
+                )
+            approved = [(path.relative_to(directory), _license_text(path)) for path in members] + approved
+            for relative, data in approved:
                 total += len(data)
                 source_total += len(data)
                 if source_total > MAX_TOTAL_BYTES or len(plan) >= MAX_LICENSE_FILES:
                     raise LicenseCollectionError("inventory_size_limit")
-                relative = path.relative_to(directory)
                 destination = Path("components") / canonical_name / version / relative
                 record = {
                     "path": destination.as_posix(),

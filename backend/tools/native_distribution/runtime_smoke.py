@@ -31,14 +31,18 @@ def checked_stage(output: Path) -> Path:
     return output
 
 
-def run(binary: Path, arguments: list[str], *, stage: Path, environment: dict[str, str]) -> dict:
+def run(
+    binary: Path, arguments: list[str], *, stage: Path, environment: dict[str, str], timeout: int = 45
+) -> dict:
+    if type(timeout) is not int or not 1 <= timeout <= 120:
+        raise ValueError("Native smoke timeout must be bounded to 120 seconds")
     child = subprocess.run(
         [str(binary), "cli", *arguments],
         cwd=stage,
         env=environment,
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=timeout,
     )
     if child.returncode != 0:
         raise RuntimeError("Frozen runtime command failed; internal child output not echoed")

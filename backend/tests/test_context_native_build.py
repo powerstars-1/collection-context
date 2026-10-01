@@ -128,6 +128,25 @@ def test_desktop_freeze_does_not_claim_other_hosts_supported(tmp_path, monkeypat
         tool.freeze_command(tmp_path, tmp_path / "source", tmp_path / "entry.py", desktop=True)
 
 
+def test_fixed_ocr_identity_comes_from_product_literals():
+    from collection_context.infrastructure import runtime_ocr_layout as layout
+
+    assert build_tool().ocr_identity() == {
+        "filename": layout.OCR_FILENAME,
+        "bytes": layout.OCR_BYTES,
+        "sha256": layout.OCR_SHA256,
+    }
+
+
+def test_ocr_freeze_uses_only_metadata_not_implicit_weight_directory(tmp_path):
+    command = build_tool().freeze_command(tmp_path, tmp_path / "source", tmp_path / "entry.py", ocr=True)
+    assert "rapidocr" in command and "onnxruntime" in command
+    assert str(tmp_path / "ocr_metadata/config.yaml") + ":rapidocr" in command
+    assert str(tmp_path / "ocr_metadata/default_models.yaml") + ":rapidocr" in command
+    assert "--collect-all" not in command and "--collect-data" not in command
+    assert not any(".onnx" in p or "/models" in p for p in command)
+
+
 def test_desktop_entry_selects_only_desktop_mode_not_implicit_data_directory(monkeypatch):
     import runpy
 
