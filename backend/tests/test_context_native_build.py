@@ -89,6 +89,119 @@ def test_media_build_rejects_unfixed_or_unsafe_archive(tmp_path, monkeypatch, ki
         tool.checked_media_package(path)
 
 
+def test_component_hash_read_ignores_only_access_time(tmp_path, monkeypatch):
+    tool = build_tool()
+    path = tmp_path.resolve() / "original-package.zip"
+    path.write_bytes(b"original fixed content")
+    identity = {"bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    original = Path.stat
+    calls = 0
+
+    def stat_with_access_time(self, *args, **kwargs):
+        nonlocal calls
+        value = original(self, *args, **kwargs)
+        if self != path:
+            return value
+        calls += 1
+        # Model the OS read effect without utime, which would also mutate ctime.
+        attrs = {
+            field: getattr(value, field)
+            for field in (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_nlink",
+                "st_uid",
+                "st_gid",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+                "st_atime_ns",
+            )
+        }
+        attrs["st_atime_ns"] += calls * 2_000_000_000
+        return SimpleNamespace(**attrs)
+
+    monkeypatch.setattr(Path, "stat", stat_with_access_time)
+    assert tool.checked_component_package(path, identity) == identity
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_nlink",
+        "st_uid",
+        "st_gid",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    ],
+)
+def test_component_hash_read_rejects_identity_or_mutation_time_change(tmp_path, monkeypatch, field):
+    tool = build_tool()
+    path = tmp_path.resolve() / "original-package.zip"
+    path.write_bytes(b"original fixed content")
+    identity = {"bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    original = tool.hashlib.file_digest
+
+    def digest_then_replace_version(stream, name):
+        digest = original(stream, name)
+        fstat = tool.os.fstat
+
+        def changed(fd):
+            info = fstat(fd)
+            attrs = {
+                key: getattr(info, key)
+                for key in (
+                    "st_dev",
+                    "st_ino",
+                    "st_mode",
+                    "st_nlink",
+                    "st_uid",
+                    "st_gid",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                )
+            }
+            attrs[field] += 1
+            return SimpleNamespace(**attrs)
+
+        monkeypatch.setattr(tool.os, "fstat", changed)
+        return digest
+
+    monkeypatch.setattr(tool.hashlib, "file_digest", digest_then_replace_version)
+    with pytest.raises(ValueError, match="content differs"):
+        tool.checked_component_package(path, identity)
+
+
+@pytest.mark.parametrize("kind", ["symlink_to_same_inode", "replacement_with_same_content"])
+def test_component_rejects_path_swap_after_descriptor_hash(tmp_path, monkeypatch, kind):
+    tool = build_tool()
+    path = tmp_path.resolve() / "original-package.zip"
+    body = b"original fixed content"
+    path.write_bytes(body)
+    identity = {"bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+    original = tool.hashlib.file_digest
+
+    def digest_then_swap(stream, name):
+        value = original(stream, name)
+        retained = path.with_name("retained-original.zip")
+        path.rename(retained)
+        if kind == "symlink_to_same_inode":
+            path.symlink_to(retained)
+        else:
+            path.write_bytes(body)
+        return value
+
+    monkeypatch.setattr(tool.hashlib, "file_digest", digest_then_swap)
+    with pytest.raises(ValueError, match="content differs"):
+        tool.checked_component_package(path, identity)
+
+
 def test_bundled_media_resource_in_both_console_and_app_commands(tmp_path, monkeypatch):
     tool = build_tool()
     monkeypatch.setattr(tool.sys, "platform", "darwin")

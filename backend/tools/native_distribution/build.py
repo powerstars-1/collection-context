@@ -12,6 +12,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import platform
 import shutil
 import stat
@@ -277,14 +278,38 @@ def ocr_identity() -> dict:
 def checked_component_package(path: Path, identity: dict) -> dict:
     if not path.is_absolute() or ".." in path.parts or any(p.is_symlink() for p in (path, *path.parents)):
         raise ValueError("Media component must be an explicit ordinary file")
-    before = path.stat()
+    before = path.lstat()
     if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != identity["bytes"]:
         raise ValueError("Media component size differs from the compiled catalog")
     with path.open("rb") as stream:
+        if component_file_version(os.fstat(stream.fileno())) != component_file_version(before):
+            raise ValueError("Media component identity changed before hashing")
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if path.stat() != before or digest != identity["sha256"]:
+        after = os.fstat(stream.fileno())
+    if (
+        component_file_version(after) != component_file_version(before)
+        or component_file_version(path.lstat()) != component_file_version(before)
+        or digest != identity["sha256"]
+    ):
         raise ValueError("Media component content differs from the compiled catalog")
     return identity
+
+
+def component_file_version(info: os.stat_result) -> tuple[int, ...]:
+    # Reading legitimately updates atime, including on external volumes. It is
+    # not a content version; keep nanosecond mutation times and descriptor/path
+    # identity checks instead of comparing the entire stat tuple's float times.
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_nlink,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
 def checked_ocr_metadata() -> dict[str, bytes]:
