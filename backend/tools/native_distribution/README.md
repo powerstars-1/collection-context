@@ -128,3 +128,21 @@ PYTHONPATH=src python tools/native_distribution/ocr_runtime_smoke.py \
 原生验证用 `ocr_native_smoke.py --binary /absolute/CollectionContext --output /absolute/new-stage --font /absolute/ordinary-developer-fixture-font`。开发者生成原创900×650的六页，冻结子进程从新HOME／空PATH运行固定权重安装和 `probe-ocr-runtime --probe-dir /absolute/new-probe --image-dir /absolute/original-pages`。字体只属于测试生成环节，产品不需要本机Python／Node／字体。探测输入、输出、资料库和runtime两两分离，固定页名／尺寸／读取上限，输出不覆盖；拒绝联网，报告保留原始识别文本、缺词及失败原因。该工具没有恢复真实抖音登录或云模型授权。
 
 原始许可补充输入为固定hash的RapidOCR v3.9.2、FlatBuffers v25.12.19、ANTLR4 v4.9.3文本；ONNX Runtime1.30.0的LICENSE／ThirdPartyNotices由固定wheel包目录读取。统一许可收集器仍拒绝其他未知文件／身份不符，不把缺文本当许可已通过。收集到文字不等于原生依赖和权重公开再分发许可已闭合。
+
+## 视频准备与 OCR 选页回归
+
+`prepare-video` 的默认产品策略现为10 fps有界扫描（最多72002采样／480本地候选／240保留画面）；FFmpeg组件探测的2 fps只作解码基线。显式runtime须先加载收据验证的CPU OCR，不可用则在解码／输入提交前报错，不借别的目录或系统OCR。原图流经同一候选时间网格，逐页记录OCR文字、框、置信度、模型身份、选中原因及缺口。
+
+仅连续、完整RGBA像素相同且OCR有效的候选可复用本地识别和去重；首尾及覆盖锚点保留。文字相同但颜色、透明度、代码字形或图案不同不合并；OCR失败保留原图并标partial。不启用未经质量验证的近似去重或字幕区域抑制；超上限明确阻塞，不静默删页。原始OCR诊断只在本地输入／产物元数据中保留，汇总模型不再次上传整份原始OCR文字和框。
+
+开发者可运行原创10视频／50页基线，不需要云Key：
+
+```bash
+PYTHONPATH=src python tools/native_distribution/ocr_pipeline_smoke.py \
+  --binary /absolute/frozen/CollectionContext --output /absolute/new-stage \
+  --font /absolute/ordinary-developer-fixture-font
+```
+
+该工具只向新库登记原创样例，再由新HOME／空PATH的冻结程序安装固定组件、实际执行视频准备。整图像素与原创页面比对用于判断选页，OCR文本和名义时间不充当视觉证据；模糊／距离过大匹配不算通过。作者安排的时间标签不是独立人工标注或精确原视频PTS。既有样例可用 `--reassess-stage /absolute/owned-stage` 在新的 `--output` 只读复评；旧报告不覆盖，不重发产品或模型请求。
+
+2026-10-02固定同源视频对照：2 fps遗漏两张约0.2秒提示词页（48/50），10 fps保留50/50；50页测试数字均被CPU OCR识别。10视频实际保留60帧，精确像素去重0；未执行云视觉请求，不承诺近似去重效果。首段处理48.544秒，后续1.898～5.262秒，冷启动原因未确认；只记录最大单子进程RSS，不当作全进程树峰值。该基线没有覆盖持续动画、复杂滚动／频繁字幕、所有闪帧、真实平台或云转写质量，完整门槛仍未通过。

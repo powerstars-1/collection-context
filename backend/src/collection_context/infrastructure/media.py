@@ -22,7 +22,7 @@ from collection_context.application.contracts import ContextError, digest
 
 THUMB_WIDTH, THUMB_HEIGHT = 160, 90
 THUMB_BYTES = THUMB_WIDTH * THUMB_HEIGHT
-PROCESSOR_VERSION = "local_media_v3"
+PROCESSOR_VERSION = "local_media_v4"
 FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm"
 
 
@@ -34,6 +34,7 @@ class MediaPolicy:
     sample_fps: int = 2
     max_sampled_frames: int = 14_402
     max_selected_frames: int = 240
+    max_ocr_frames: int = 480
     anchor_seconds: float = 30
     audio_segment_seconds: float = 240
     audio_overlap_seconds: float = 1
@@ -51,6 +52,7 @@ class MediaPolicy:
             "sample_fps": (1, 10),
             "max_sampled_frames": (1, 144_002),
             "max_selected_frames": (1, 2400),
+            "max_ocr_frames": (1, 2400),
             "max_audio_segments": (1, 1000),
             "max_audio_bytes": (1000, 32_000_000),
             "max_frame_bytes": (1000, 32_000_000),
@@ -196,6 +198,8 @@ class FrameScanner:
 
     @staticmethod
     def changes(first: bytes, second: bytes) -> tuple[float, float, int]:
+        if first == second:
+            return 0, 0, 0
         # Local tile change catches small text changes lost in a whole-image average.
         sums = [0] * 36
         counts = [0] * 36

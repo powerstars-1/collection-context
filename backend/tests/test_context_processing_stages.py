@@ -133,6 +133,29 @@ def test_three_roles_publish_searchable_evidence_and_reuse_without_new_calls(sto
     assert service.read(material["id"])["text"] == original
 
 
+def test_summary_keeps_ocr_diagnostics_local_without_duplicate_raw_text_upload(store):
+    material = item(store)
+    requests = []
+    coverage = {
+        "complete": False,
+        "ocr_state": "partial",
+        "ocr_failures": ["f_000001"],
+        "ocr_calls": 3,
+        "ocr_records": [{"lines": [{"text": "ONLY_LOCAL_OCR_" * 20_000}]}],
+    }
+    configured = stages(store, material, requests, coverage=coverage)
+    executor = DurableExecutor(store)
+    result = executor.run(
+        executor.submit(configured, idempotency_key="local-ocr", max_calls=3)["id"], configured
+    )
+    assert result["state"] == "succeeded" and len(requests) == 3
+    sent = json.dumps(requests[-1], ensure_ascii=False)
+    assert "ONLY_LOCAL_OCR" not in sent and "ocr_records" not in sent
+    assert "ocr_failures" in sent and "f_000001" in sent and "ocr_calls" in sent
+    stored = ContextService(store).read(material["id"], artifact="screen")["coverage"]
+    assert stored["source_coverage"]["ocr_records"] == coverage["ocr_records"]
+
+
 def test_metadata_only_update_reuses_audio_vision_but_changes_summary(store):
     material = item(store)
     requests = []

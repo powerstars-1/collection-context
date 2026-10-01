@@ -9,14 +9,36 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.media import LocalMedia, MediaPolicy
+from collection_context.infrastructure.ocr import OcrResult
 from collection_context.infrastructure.runtime_dependencies import RECEIPT_NAME
 from collection_context.library.store import LibraryStore
-from collection_context.processing.inputs import PreparedInputs, _RuntimeLocalMedia
+from collection_context.processing.inputs import DEFAULT_VIDEO_POLICY, PreparedInputs, _RuntimeLocalMedia
+
+
+def inject_ocr(monkeypatch):
+    # Decoder guards remain unit tested independently of OCR installation/quality.
+    monkeypatch.setattr(
+        "collection_context.processing.inputs.load_runtime_ocr",
+        lambda *args, **kwargs: SimpleNamespace(
+            engine_version="original-injected",
+            model_hashes={},
+            recognize=lambda image: OcrResult([], 0, "no_text", "original-injected"),
+        ),
+    )
+
+
+def test_product_default_sampling_is_dense_but_ocr_and_cloud_counts_remain_bounded():
+    assert DEFAULT_VIDEO_POLICY.sample_fps == 10
+    assert DEFAULT_VIDEO_POLICY.max_sampled_frames == 72_002
+    assert DEFAULT_VIDEO_POLICY.max_duration_seconds == 7200
+    assert DEFAULT_VIDEO_POLICY.max_ocr_frames == 480
+    assert DEFAULT_VIDEO_POLICY.max_selected_frames == 240
 
 
 @pytest.fixture
@@ -102,6 +124,7 @@ def test_failed_receipt_check_does_not_enter_native_decoder(monkeypatch):
 
 @pytest.mark.parametrize("corruption", ["missing", "hash", "unsafe_permissions"])
 def test_bad_runtime_is_not_fallback_and_does_not_prepare_input(store, tmp_path, monkeypatch, corruption):
+    inject_ocr(monkeypatch)
     runtime, tools = fake_runtime(tmp_path)
     item = add(store)
     before = store.snapshot()
@@ -130,6 +153,7 @@ def test_bad_runtime_is_not_fallback_and_does_not_prepare_input(store, tmp_path,
 def test_mid_session_binary_or_coherent_receipt_change_stops_next_execution(
     store, tmp_path, monkeypatch, replace_receipt
 ):
+    inject_ocr(monkeypatch)
     runtime, tools = fake_runtime(tmp_path)
     item = add(store)
     before = store.snapshot()
@@ -153,10 +177,78 @@ def test_mid_session_binary_or_coherent_receipt_change_stops_next_execution(
     assert not store.get(item["id"]).get("prepared_input")
 
 
+def test_missing_fixed_ocr_blocks_before_decoder_or_library_write(store, tmp_path, monkeypatch):
+    runtime, _ = fake_runtime(tmp_path)
+    item = add(store)
+    before = store.snapshot()
+    monkeypatch.setattr(
+        subprocess, "Popen", lambda *args, **kwargs: pytest.fail("Missing OCR must not enter decoder")
+    )
+    monkeypatch.setattr(
+        shutil, "which", lambda *args, **kwargs: pytest.fail("Must not borrow system OCR/media")
+    )
+    with pytest.raises(ContextError) as caught:
+        PreparedInputs(store, runtime_dir=runtime).prepare_video(item["id"], b"original-fixture")
+    assert caught.value.code == "runtime_dependency_missing" and store.snapshot() == before
+
+
+def test_prepared_video_connects_ocr_records_selection_and_originals(store, tmp_path, monkeypatch):
+    from test_context_ocr_selection import Engine, page, png, result
+
+    from collection_context.infrastructure.media import PROCESSOR_VERSION
+
+    runtime, _ = fake_runtime(tmp_path)
+    item = add(store)
+    engine = Engine([result(), ContextError("ocr_failed", "original page failure")])
+    frames = [page(0), page(1), page(2, data=png(color=(0, 20, 30, 255))), page(3, reasons=("last",))]
+    seen = []
+
+    class Media:
+        strategy_hash = "original-source-strategy"
+        info = SimpleNamespace(has_audio=False)
+
+        def __init__(self, data, **kwargs):
+            seen.append(kwargs["policy"].max_selected_frames)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def audio_segments(self):
+            return []
+
+        def scan_frames(self):
+            return [f.candidate for f in frames], {"complete": False, "sampled_frames": 4}
+
+        def frames(self, candidates, consumer):
+            for value in frames:
+                consumer(value)
+
+    monkeypatch.setattr("collection_context.processing.inputs._RuntimeLocalMedia", Media)
+    monkeypatch.setattr("collection_context.processing.inputs.load_runtime_ocr", lambda *a, **k: engine)
+    identity = PreparedInputs(store, runtime_dir=runtime).prepare_video(
+        item["id"], b"original-source-video", policy=MediaPolicy(max_ocr_frames=10)
+    )
+    payload = PreparedInputs(store).load(identity)
+    assert payload["processor_version"] == PROCESSOR_VERSION
+    assert payload["originals"][0]["sha256"] == hashlib.sha256(b"original-source-video").hexdigest()
+    assert payload["audio"] == [] and seen == [10]
+    assert len(payload["frames"]) == 3 and payload["coverage"]["ocr_candidates"] == 4
+    assert payload["coverage"]["ocr_duplicate_frames"] == 1
+    assert payload["coverage"]["ocr_state"] == "partial"
+    assert payload["coverage"]["ocr_failures"] == ["f_000002"]
+    assert payload["frames"][1]["candidate"]["reasons"][-1] == "ocr_error"
+    assert any("failed" in gap for gap in payload["coverage"]["gaps"])
+    assert not store.snapshot()["jobs"]
+
+
 @pytest.mark.skipif(
     os.environ.get("RUN_LOCAL_MEDIA_RUNTIME") != "1", reason="Explicit original native media test only"
 )
 def test_real_original_small_video_uses_receipt_without_path(store, tmp_path, monkeypatch):
+    inject_ocr(monkeypatch)
     # These copied developer binaries may still link system/Homebrew shared libraries.
     # This verifies receipt execution and decoding, NOT standalone distribution readiness.
     ffmpeg = shutil.which("ffmpeg")

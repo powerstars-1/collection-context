@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +20,14 @@ from collection_context.infrastructure.media import (
     PreparedFrame,
 )
 from collection_context.infrastructure.runtime_dependencies import RuntimeDependencies
+from collection_context.infrastructure.runtime_ocr import load_runtime_ocr
 from collection_context.library.store import LibraryStore
+from collection_context.processing.ocr_selection import OCR_SELECTION_VERSION, OcrFrameSelection
 
 MAX_TOTAL = 512_000_000
+# The 2 fps decoder probe remains a baseline, not the product's extraction policy.
+# Authored 0.2-second critical-page regressions require a denser input grid.
+DEFAULT_VIDEO_POLICY = MediaPolicy(sample_fps=10, max_sampled_frames=72_002)
 EXTENSIONS = {
     "video/mp4": "mp4",
     "video/webm": "webm",
@@ -396,10 +401,8 @@ class PreparedInputs:
             or payload["kind"] != item["media_type"]
         ):
             raise ContextError("input_superseded", "来源快照与当前资料不一致。")
-        version = PROCESSOR_VERSION if payload["kind"] == "video" else "original_image_pages_v1"
-        if payload["processor_version"] != version:
-            return None
         # load() verifies originals. Verify audio and frames one at a time, not full lists of byte arrays.
+        # Check obsolete inputs too: an upgrade must not hide corruption behind a fresh download.
         for segment in payload["audio"]:
             self._read_blob(ref, segment["blob"])
         for frame in payload["frames"]:
@@ -412,6 +415,9 @@ class PreparedInputs:
             or current.get("source_asset_hash") != source_asset_hash
         ):
             raise ContextError("version_changed", "来源媒体在核对期间变化，未复用旧快照。")
+        version = PROCESSOR_VERSION if payload["kind"] == "video" else "original_image_pages_v1"
+        if payload["processor_version"] != version:
+            return None
         return identity
 
     def bind_source(self, ref: str, identity: str, source_asset_hash: str, content_hash: str) -> None:
@@ -475,9 +481,14 @@ class PreparedInputs:
         item = self.store.get(ref)
         if expected_content_hash is not None and item["content_hash"] != expected_content_hash:
             raise ContextError("version_changed", "准备前原资料已变化，未登记旧媒体。")
+        policy = policy or DEFAULT_VIDEO_POLICY
+        engine = None
         if self.runtime_dir is None:
             session = LocalMedia(data, policy=policy)
         else:
+            # Explicit product runtime never borrows a system OCR/model directory.
+            # Missing OCR stops before decoding or writing prepared inputs.
+            engine = load_runtime_ocr(self.runtime_dir, library_dir=self.store.files.root)
             runtime = RuntimeDependencies(self.runtime_dir, library_dir=self.store.files.root)
             pinned = {role: runtime.resolve(role) for role in ("ffmpeg", "ffprobe")}
 
@@ -494,7 +505,7 @@ class PreparedInputs:
 
             session = _RuntimeLocalMedia(
                 data,
-                policy=policy,
+                policy=replace(policy, max_selected_frames=policy.max_ocr_frames),
                 ffmpeg=pinned["ffmpeg"].path,
                 ffprobe=pinned["ffprobe"].path,
                 resolve_tool=resolve_tool,
@@ -503,7 +514,39 @@ class PreparedInputs:
             segments = list(media.audio_segments())
             candidates, coverage = media.scan_frames()
             frames: list[PreparedFrame] = []
-            media.frames(candidates, frames.append)
+            strategy_hash = media.strategy_hash
+            if engine is None:
+                media.frames(candidates, frames.append)
+            else:
+                selector = OcrFrameSelection(
+                    engine, policy, max_bytes=MAX_TOTAL - len(data) - sum(len(p.data) for p in segments)
+                )
+                media.frames(candidates, selector.feed)
+                frames = selector.frames
+                strategy_hash = digest(
+                    [
+                        media.strategy_hash,
+                        OCR_SELECTION_VERSION,
+                        asdict(policy),
+                        engine.engine_version,
+                        engine.model_hashes,
+                    ]
+                )
+                coverage = {
+                    **coverage,
+                    **selector.coverage(),
+                    "strategy_hash": strategy_hash,
+                    "candidate_frames": len(candidates),
+                    "gaps": [
+                        "Sub-sample flashes and details lost when downscaling can be missed.",
+                        "Distinct moving visuals are retained; near-duplicate and subtitle suppression remain unvalidated.",
+                        *(
+                            ["Some local OCR pages failed; their original frames are retained."]
+                            if selector.coverage()["ocr_failures"]
+                            else []
+                        ),
+                    ],
+                }
             return self.save(
                 ref,
                 content_hash=item["content_hash"],
@@ -512,7 +555,7 @@ class PreparedInputs:
                 frames=frames,
                 coverage={**coverage, "has_audio": media.info.has_audio, "media_kind": "video"},
                 processor_version=PROCESSOR_VERSION,
-                strategy_hash=media.strategy_hash,
+                strategy_hash=strategy_hash,
                 kind="video",
             )
 
