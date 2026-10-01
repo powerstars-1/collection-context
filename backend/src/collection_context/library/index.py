@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import unicodedata
 import uuid
 from pathlib import PurePosixPath
@@ -12,7 +13,7 @@ from typing import Any
 from collection_context.application.contracts import ContextError, canonical_bytes, digest, valid_id
 from collection_context.library.store import LibraryStore
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 
 def normalize(text: str) -> str:
@@ -80,11 +81,11 @@ class FileIndex:
     def __init__(self, store: LibraryStore):
         self.store = store
 
-    def rebuild(self) -> dict[str, Any]:
+    def rebuild(self, *, generated_entries: dict[str, str] | None = None) -> dict[str, Any]:
         """A maintenance action, never called implicitly by search/read/status."""
         with self.store.writer() as owner:
             state = self.store.snapshot()
-            return self.rebuild_committed(state, owner)
+            return self.rebuild_committed(state, owner, generated_entries=generated_entries)
 
     @staticmethod
     def readable_path(ref: str) -> str:
@@ -120,15 +121,78 @@ class FileIndex:
             lines.append("- 尚无提取产物")
         return ("\n".join(lines) + "\n").encode("utf-8")
 
-    def rebuild_committed(self, state: dict[str, Any], owner: Any) -> dict[str, Any]:
+    def generated_entries(self) -> dict[str, str]:
+        """Return only proven hashes from the current derived index; old/unreadable indexes prove nothing."""
+        try:
+            pointer = json.loads(self.store.files.read(".context/索引/CURRENT.json", max_bytes=65_536))
+            version = valid_id(pointer["version"])
+            body = self.store.files.read(f".context/索引/{version}.json")
+            data = json.loads(body)
+            entries = data.get("generated_entries", {})
+            if (
+                hashlib.sha256(body).hexdigest() != pointer["sha256"]
+                or data["schema_version"] != INDEX_VERSION
+                or data["workspace_id"] != self.store.workspace_id
+                or not isinstance(entries, dict)
+                or any(
+                    not isinstance(path, str)
+                    or not isinstance(sha, str)
+                    or not re.fullmatch(r"[a-f0-9]{64}", sha)
+                    for path, sha in entries.items()
+                )
+            ):
+                raise ValueError
+            return dict(entries)
+        except (ContextError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return {}
+
+    def rebuild_committed(
+        self,
+        state: dict[str, Any],
+        owner: Any,
+        *,
+        generated_entries: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Rebuild while the caller owns the writer lease and supplied state is already committed."""
         self.store._check_writer(owner)
         documents: dict[str, dict[str, str]] = {}
         gaps: list[dict[str, str]] = []
+        previous_entries = self.generated_entries() if generated_entries is None else generated_entries
+        next_generated_entries: dict[str, str] = {}
         for ref, item in state["items"].items():
-            self.store.files.write(
-                self.readable_path(ref), self._readable_markdown(item), replace=True
-            )
+            entry_path = self.readable_path(ref)
+            desired = self._readable_markdown(item)
+            desired_hash = hashlib.sha256(desired).hexdigest()
+            try:
+                current = self.store.files.read(entry_path, max_bytes=2_000_000)
+            except ContextError as error:
+                if error.code not in {"not_found", "forbidden_path"}:
+                    raise
+                self.store.files.write(entry_path, desired, replace=True)
+                next_generated_entries[entry_path] = desired_hash
+            else:
+                tracked_hash = previous_entries.get(entry_path)
+                current_hash = hashlib.sha256(current).hexdigest()
+                if tracked_hash is None:
+                    gaps.append(
+                        {
+                            "material_ref": ref,
+                            "artifact": "readable_entry",
+                            "code": "readable_entry_untracked",
+                        }
+                    )
+                elif current_hash != tracked_hash:
+                    gaps.append(
+                        {
+                            "material_ref": ref,
+                            "artifact": "readable_entry",
+                            "code": "readable_entry_user_modified",
+                        }
+                    )
+                    next_generated_entries[entry_path] = tracked_hash
+                else:
+                    self.store.files.write(entry_path, desired, replace=True)
+                    next_generated_entries[entry_path] = desired_hash
             if item["excluded"]:
                 continue
             fields = {"metadata": "\n".join((item["title"], item["author"], item["body"]))}
@@ -148,6 +212,7 @@ class FileIndex:
             "library_version": library_version(state),
             "documents": documents,
             "gaps": gaps,
+            "generated_entries": next_generated_entries,
         }
         body = canonical_bytes(data)
         if len(body) > 16_000_000:

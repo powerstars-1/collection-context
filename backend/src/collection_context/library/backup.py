@@ -92,11 +92,50 @@ def _add_file(files: dict[str, bytes], path: str, body: bytes) -> None:
 
 def _collect_files(
     store: LibraryStore, state: dict[str, Any], *, include_media: bool
-) -> tuple[dict[str, bytes], list[dict[str, Any]]]:
+) -> tuple[
+    dict[str, bytes], list[dict[str, Any]], list[dict[str, str]], dict[str, str]
+]:
     files: dict[str, bytes] = {}
     omitted: list[dict[str, Any]] = []
+    entry_gaps: list[dict[str, str]] = []
+    generated_entries = FileIndex(store).generated_entries()
+    retained_tracking: dict[str, str] = {}
     for ref, item in state["items"].items():
-        _add_file(files, FileIndex.readable_path(ref), FileIndex._readable_markdown(item))
+        entry_path = FileIndex.readable_path(ref)
+        try:
+            entry_body = store.files.read(entry_path, max_bytes=2_000_000)
+        except ContextError as error:
+            if error.code not in {"not_found", "forbidden_path"}:
+                raise
+            entry_body = FileIndex._readable_markdown(item)
+            entry_gaps.append(
+                {
+                    "material_ref": ref,
+                    "path": entry_path,
+                    "code": "readable_entry_missing_regenerated_in_backup",
+                }
+            )
+        else:
+            tracked = generated_entries.get(entry_path)
+            if tracked is None:
+                entry_gaps.append(
+                    {
+                        "material_ref": ref,
+                        "path": entry_path,
+                        "code": "readable_entry_untracked_preserved",
+                    }
+                )
+            elif _sha256(entry_body) != tracked:
+                entry_gaps.append(
+                    {
+                        "material_ref": ref,
+                        "path": entry_path,
+                        "code": "readable_entry_user_modified_preserved",
+                    }
+                )
+            else:
+                retained_tracking[entry_path] = tracked
+        _add_file(files, entry_path, entry_body)
         for artifact in item["artifacts"].values():
             body = store.files.read(artifact["path"], max_bytes=MAX_FILE_BYTES)
             if _sha256(body) != artifact["sha256"]:
@@ -135,7 +174,12 @@ def _collect_files(
                 )
     if len(files) > MAX_FILES or sum(len(body) for body in files.values()) > MAX_TOTAL_BYTES:
         raise ContextError("backup_size_limit", "备份文件数或总大小超过当前验证上限。")
-    return files, sorted(omitted, key=lambda value: value["path"])
+    return (
+        files,
+        sorted(omitted, key=lambda value: value["path"]),
+        sorted(entry_gaps, key=lambda value: value["path"]),
+        retained_tracking,
+    )
 
 
 def create_backup(
@@ -154,7 +198,9 @@ def create_backup(
                 raise ContextError(
                     "backup_requires_pause", "请先关闭自动同步和自动处理，再创建一致备份。"
                 )
-            files, omitted = _collect_files(store, state, include_media=media_scope == "all")
+            files, omitted, entry_gaps, generated_entry_hashes = _collect_files(
+                store, state, include_media=media_scope == "all"
+            )
             backup_state = _disabled_state(state, include_media=media_scope == "all")
             state_body = canonical_bytes(backup_state)
             records: list[dict[str, Any]] = [
@@ -174,6 +220,8 @@ def create_backup(
                 "total_bytes": sum(int(record["bytes"]) for record in records),
                 "files": records,
                 "omitted_media": omitted,
+                "readable_entry_gaps": entry_gaps,
+                "generated_entry_hashes": generated_entry_hashes,
                 "excluded_members": [
                     ".context/访问规则.json",
                     ".context/索引/",
@@ -210,6 +258,7 @@ def create_backup(
                 "file_count": len(records),
                 "total_bytes": manifest["total_bytes"],
                 "omitted_media": len(omitted),
+                "readable_entry_gaps": entry_gaps,
                 "sha256": _file_sha256(output),
                 "automation_restored": False,
             }
@@ -301,7 +350,9 @@ def _validate_state(state: dict[str, Any], workspace_id: str) -> None:
         raise ContextError("backup_invalid", "备份状态不兼容或自动任务未安全关闭。") from None
 
 
-def _validate_references(state: dict[str, Any], files: dict[str, bytes]) -> None:
+def _validate_references(
+    state: dict[str, Any], files: dict[str, bytes], generated_entries: dict[str, str]
+) -> None:
     filenames = {
         "original": "原文",
         "audio": "音频转写",
@@ -312,10 +363,13 @@ def _validate_references(state: dict[str, Any], files: dict[str, bytes]) -> None
         "user_note": "用户备注",
     }
     expected: set[str] = set()
+    readable_paths: set[str] = set()
     try:
         for ref, item in state["items"].items():
             valid_id(ref)
-            expected.add(FileIndex.readable_path(ref))
+            entry_path = FileIndex.readable_path(ref)
+            expected.add(entry_path)
+            readable_paths.add(entry_path)
             for kind, artifact in item["artifacts"].items():
                 version = valid_id(artifact["version"])
                 path = f"content-vault/80_附件/抖音/{ref}/{version}/{filenames[kind]}.md"
@@ -358,7 +412,18 @@ def _validate_references(state: dict[str, Any], files: dict[str, bytes]) -> None
                 ):
                     raise ValueError
                 expected.add(blob_path)
-        if expected != set(files):
+        if (
+            expected != set(files)
+            or not isinstance(generated_entries, dict)
+            or not set(generated_entries) <= readable_paths
+            or any(
+                not isinstance(path, str)
+                or not isinstance(sha, str)
+                or files.get(path) is None
+                or _sha256(files[path]) != sha
+                for path, sha in generated_entries.items()
+            )
+        ):
             raise ValueError
     except (KeyError, TypeError, ValueError, json.JSONDecodeError, ContextError):
         raise ContextError(
@@ -379,7 +444,8 @@ def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
         raise ContextError("restore_destination_invalid", "备份文件不能位于恢复目标中。")
     manifest, state, files = _archive_data(archive_path)
     _validate_state(state, manifest["workspace_id"])
-    _validate_references(state, files)
+    generated_entries = manifest.get("generated_entry_hashes", {})
+    _validate_references(state, files, generated_entries)
     staging = Path(
         tempfile.mkdtemp(prefix=f".{destination.name}-restore-", dir=destination.parent)
     )
@@ -408,7 +474,7 @@ def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
             restored_state = restored.snapshot()
             if restored_state != state:
                 raise ContextError("restore_validation_failed", "恢复后提交状态与备份不一致。")
-            index = FileIndex(restored).rebuild()
+            index = FileIndex(restored).rebuild(generated_entries=generated_entries)
         finally:
             restored.close()
         if destination.exists():
@@ -422,6 +488,7 @@ def restore_backup(archive_path: Path, destination: Path) -> dict[str, Any]:
             "media_scope": manifest["media_scope"],
             "restored_files": len(files),
             "omitted_media": len(manifest["omitted_media"]),
+            "readable_entry_gaps": manifest.get("readable_entry_gaps", []),
             "indexed_items": index["indexed_items"],
             "auto_sync": False,
             "auto_process": False,

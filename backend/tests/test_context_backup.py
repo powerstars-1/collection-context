@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from collection_context.application.contracts import ContextError, canonical_bytes
+from collection_context.application.contracts import ContextError, canonical_bytes, item_id
 from collection_context.application.service import ContextService
 from collection_context.interfaces.access import ACCESS_FILE, AccessRegistry
 from collection_context.library.backup import create_backup, restore_backup
@@ -92,6 +92,32 @@ def test_content_commits_maintain_index_and_readable_entry_without_read_writes(s
     assert item["id"] in readable and "本页由收藏上下文后端" in readable
 
 
+def test_user_edited_readable_entry_is_preserved_and_reported(store):
+    item = add(store)
+    path = FileIndex.readable_path(item["id"])
+    custom = "# 用户手工版\n\n这段内容不得被同步覆盖。\n".encode()
+    store.files.write(path, custom, replace=True)
+    store.upsert(
+        {"native_id": "123", "title": "备份 UI 教程", "body": "原创合成资料", "author": "作者"},
+        kind="liked",
+        scope_id="s_likes",
+    )
+    assert store.files.read(path) == custom
+    result = ContextService(store).search("备份 UI")
+    assert any(gap["code"] == "readable_entry_user_modified" for gap in result["integrity_gaps"])
+
+
+def test_untracked_existing_entry_is_never_claimed_or_overwritten(store):
+    ref = item_id("douyin", "777")
+    path = FileIndex.readable_path(ref)
+    custom = "# 迁移前已有手工入口\n".encode()
+    store.files.write(path, custom, replace=True)
+    item = add(store, native="777")
+    assert item["id"] == ref and store.files.read(path) == custom
+    result = ContextService(store).search("备份 UI")
+    assert any(gap["code"] == "readable_entry_untracked" for gap in result["integrity_gaps"])
+
+
 def test_index_failure_is_explicit_after_content_commit(store, monkeypatch):
     original = FileIndex.rebuild_committed
 
@@ -141,7 +167,47 @@ def test_full_backup_restore_preserves_content_media_jobs_and_excludes_secrets(s
         assert state["jobs"][job["id"]]["state"] == "queued"
         assert reopened.files.read(blob_path) == media
         assert ContextService(reopened).search("备份 UI")["total_matches"] == 1
+        reopened.upsert(
+            {
+                "native_id": "123",
+                "title": "备份 UI 教程",
+                "body": "原创合成资料",
+                "author": "作者",
+            },
+            kind="liked",
+            scope_id="s_likes",
+        )
+        assert not any(
+            gap["artifact"] == "readable_entry"
+            for gap in ContextService(reopened).search("备份 UI")["integrity_gaps"]
+        )
         fails("not_found", lambda: reopened.files.read(ACCESS_FILE))
+    finally:
+        reopened.close()
+
+
+def test_backup_preserves_real_user_edited_entry_and_declares_gap(store, tmp_path):
+    item = add(store)
+    path = FileIndex.readable_path(item["id"])
+    custom = "# 用户在 Obsidian 中的修订\n\n保留我的文字。\n".encode()
+    store.files.write(path, custom, replace=True)
+    archive = tmp_path / "edited-entry.zip"
+    result = create_backup(store, archive, media_scope="all")
+    assert result["readable_entry_gaps"] == [
+        {
+            "material_ref": item["id"],
+            "path": path,
+            "code": "readable_entry_user_modified_preserved",
+        }
+    ]
+    with zipfile.ZipFile(archive) as package:
+        assert package.read(FILES_PREFIX + path) == custom
+    destination = tmp_path / "edited-entry-restore"
+    restored = restore_backup(archive, destination)
+    assert restored["readable_entry_gaps"] == result["readable_entry_gaps"]
+    reopened = LibraryStore(destination)
+    try:
+        assert reopened.files.read(path) == custom
     finally:
         reopened.close()
 
