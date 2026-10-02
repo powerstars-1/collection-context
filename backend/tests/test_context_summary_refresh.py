@@ -20,7 +20,9 @@ from collection_context.interfaces.security import AccessPolicy, Credential
 from collection_context.library.backup import create_backup, restore_backup
 from collection_context.library.store import LibraryStore
 from collection_context.processing.profiles import ModelCatalog
+from collection_context.processing.stages import LEGACY_SUMMARY_VERSION, SUMMARY_VERSION
 from collection_context.processing.summary_refresh import build, prepare
+from collection_context.workflows.executor import plan
 from collection_context.workflows.extraction import ExtractionWorkflow
 from collection_context.workflows.worker import BackgroundWorker
 
@@ -117,6 +119,43 @@ def fails(code, action):
     with pytest.raises(ContextError) as caught:
         action()
     assert caught.value.code == code
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_summary_only_queue_preserves_prompt_after_reopen(env, monkeypatch, legacy):
+    store, secrets, _, _, item, _ = env
+    sent = sent_requests(monkeypatch)
+    payload = prepare(store, item["id"])
+    assert payload["extraction"]["summary_prompt_version"] == SUMMARY_VERSION
+    version = LEGACY_SUMMARY_VERSION if legacy else SUMMARY_VERSION
+    if legacy:
+        payload["extraction"].pop("summary_prompt_version")
+        payload["plan"] = plan(build(store, secrets.get, payload["extraction"], planning=True))
+    job = ExtractionWorkflow(store, secrets.get).executor.jobs.submit(
+        "process", payload, idempotency_key="version-fixed", max_calls=1
+    )
+    monkeypatch.setattr("collection_context.processing.summary_refresh.SUMMARY_VERSION", "future-default")
+    monkeypatch.setattr("collection_context.processing.stages.SUMMARY_VERSION", "future-default")
+    reopened = LibraryStore(store.files.root)
+    try:
+        stages = build(reopened, secrets.get, payload["extraction"], planning=True)
+        assert plan(stages) == payload["plan"]
+        assert next(stage for stage in stages if stage.name == "summary").processor_version == version
+        assert ExtractionWorkflow(reopened, secrets.get).run(job["id"])["state"] == "succeeded"
+    finally:
+        reopened.close()
+    assert len(sent) == 1
+    assert ("allowed_citations" in sent[0]["messages"][0]["content"][0]["text"]) is not legacy
+
+
+@pytest.mark.parametrize("version", [None, [], {}, "extraction_summary_v999"])
+def test_summary_only_unknown_version_precedes_secret_resolution(env, version):
+    store, _, _, _, item, _ = env
+    context = prepare(store, item["id"])["extraction"]
+    context["summary_prompt_version"] = version
+    fails(
+        "processor_version_changed", lambda: build(store, lambda _: pytest.fail("resolved secret"), context)
+    )
 
 
 def test_preview_is_readonly_no_secret_or_request_and_strict_fee_confirmation(env, monkeypatch):

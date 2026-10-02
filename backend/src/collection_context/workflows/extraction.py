@@ -11,8 +11,11 @@ from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 from collection_context.processing.profiles import ModelCatalog
 from collection_context.processing.stages import (
+    LEGACY_SUMMARY_VERSION,
+    SUMMARY_VERSION,
     VERSION,
     audio_stage,
+    checked_summary_version,
     publish_stage,
     summary_stage,
     vision_stage,
@@ -43,7 +46,7 @@ class ExtractionWorkflow:
             from collection_context.processing.summary_refresh import build
 
             return build(self.store, self.resolve_secret, context, planning=planning)
-        if not isinstance(context, dict) or set(context) != {
+        if not isinstance(context, dict) or set(context) - {"summary_prompt_version"} != {
             "schema_version",
             "workflow",
             "input_id",
@@ -58,6 +61,9 @@ class ExtractionWorkflow:
             or context["processor_version"] != VERSION
         ):
             raise ContextError("processor_version_changed", "任务处理策略版本不兼容，未自动替换为新策略。")
+        summary_version = checked_summary_version(
+            context.get("summary_prompt_version", LEGACY_SUMMARY_VERSION)
+        )
         payload = self.inputs.load(context["input_id"])
         ref = payload["material_ref"]
         current = self.store.get(ref)
@@ -105,6 +111,7 @@ class ExtractionWorkflow:
             clients["summary"],
             source_coverage=payload["coverage"],
             max_input_chars=context["summary_input_chars"],
+            prompt_version=summary_version,
         )
         stages.append(combined)
         stages.append(
@@ -161,6 +168,7 @@ class ExtractionWorkflow:
             else {role: model_profiles[role] for role in roles},
             "processor_version": VERSION,
             "summary_input_chars": summary_input_chars,
+            "summary_prompt_version": SUMMARY_VERSION,
         }
         stages = self._build(context, planning=True)  # No credential resolution or network at submission.
         return {"plan": plan(stages), "extraction": context}

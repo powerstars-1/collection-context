@@ -10,7 +10,12 @@ from collection_context.application.contracts import ContextError, digest, valid
 from collection_context.library.index import artifact_bytes, audio_not_applicable, is_current
 from collection_context.library.store import LibraryStore
 from collection_context.processing.profiles import ModelCatalog
-from collection_context.processing.stages import summary_stage
+from collection_context.processing.stages import (
+    LEGACY_SUMMARY_VERSION,
+    SUMMARY_VERSION,
+    checked_summary_version,
+    summary_stage,
+)
 from collection_context.workflows.executor import Stage, StageOutcome, plan
 
 VERSION = "summary_refresh_v1"
@@ -117,7 +122,7 @@ def build(
 ) -> list[Stage]:
     if (
         not isinstance(context, dict)
-        or set(context)
+        or set(context) - {"summary_prompt_version"}
         != {
             "schema_version",
             "workflow",
@@ -140,6 +145,7 @@ def build(
         or set(context["model_profiles"]) != {"summary"}
     ):
         raise ContextError("invalid_extraction_plan", "正文总结任务结构或版本不兼容。")
+    summary_version = checked_summary_version(context.get("summary_prompt_version", LEGACY_SUMMARY_VERSION))
     snapshot = verify(store, context)
     models = ModelCatalog(store)
     profile_id = context["model_profiles"]["summary"]
@@ -168,6 +174,7 @@ def build(
         source_coverage=snapshot["coverage"],
         max_input_chars=context["summary_input_chars"],
         registered_text_refs=True,
+        prompt_version=summary_version,
     )
     assert combined.validate is not None
     combined.validate(source_outputs)
@@ -180,6 +187,7 @@ def build(
             source_coverage=snapshot["coverage"],
             max_input_chars=context["summary_input_chars"],
             registered_text_refs=True,
+            prompt_version=summary_version,
         )
     stages = []
     for source in snapshot["sources"]:
@@ -280,6 +288,7 @@ def prepare(store: LibraryStore, ref: str, *, max_input_chars: int = 100_000) ->
         "output_version": snapshot["output_version"],
         "model_profiles": ModelCatalog(store).pin(("summary",)),
         "summary_input_chars": max_input_chars,
+        "summary_prompt_version": SUMMARY_VERSION,
     }
     stages = build(store, lambda _: "planning-only-placeholder", context, planning=True)
     return {"plan": plan(stages), "extraction": context}

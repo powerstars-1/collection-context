@@ -1,14 +1,15 @@
 """Offline failures observed in the explicitly authorized three-request cloud acceptance."""
 
+import hashlib
 import json
 
 import pytest
 
 from collection_context.processing.models import CloudModelClient, ModelProfile
-from collection_context.processing.stages import summary_stage
+from collection_context.processing.stages import LEGACY_SUMMARY_VERSION, SUMMARY_VERSION, summary_stage
 
 
-def summarize(text):
+def summarize(text, *, version=SUMMARY_VERSION):
     captured = []
 
     class Response:
@@ -42,6 +43,7 @@ def summarize(text):
         ("screen_f_000000",),
         client,
         source_coverage={"complete": False, "scope": "one original still page"},
+        prompt_version=version,
     )
     result = stage.invoke(
         {
@@ -52,6 +54,22 @@ def summarize(text):
         }
     )
     return result, captured[0]
+
+
+def test_v4_prompt_is_byte_identical_for_previously_queued_tasks():
+    _, prompt = summarize("保留导航[f_000000]", version=LEGACY_SUMMARY_VERSION)
+    assert (
+        hashlib.sha256(prompt.encode()).hexdigest()
+        == "82120ae55a224f2d3f59659694445f5d177c90564b1acb2021911c91bc2c5031"
+    )
+
+
+def test_v5_lists_actual_screen_refs_without_suggesting_nonexistent_audio():
+    _, prompt = summarize("保留导航[f_000000]")
+    payload = json.loads(prompt.split("资料JSON：\n", 1)[1])
+    assert payload["allowed_citations"] == [{"evidence_id": "f_000000", "kind": None, "status": "ready"}]
+    assert "a_000000" not in prompt and "f_000001" not in prompt
+    assert "不要因为编号或旧正文提到音频" in prompt
 
 
 @pytest.mark.parametrize(
@@ -87,6 +105,8 @@ def test_verbatim_original_quote_remains_supported():
 
 
 def test_registered_text_cannot_reuse_its_embedded_previous_frame_citations():
+    prompts = []
+
     class Response:
         headers = {}
 
@@ -105,9 +125,13 @@ def test_registered_text_cannot_reuse_its_embedded_previous_frame_citations():
                 }
             ).encode()
 
+    def transport(request, **kwargs):
+        prompts.append(json.loads(request.data)["messages"][0]["content"][0]["text"])
+        return Response()
+
     client = CloudModelClient(
         ModelProfile("https://fixture.invalid/v1", "fixture", "synthetic-not-live-key"),
-        transport=lambda *a, **kw: Response(),
+        transport=transport,
     )
     snapshot_id = "t_" + "1" * 64
     stage = summary_stage(
@@ -126,6 +150,8 @@ def test_registered_text_cannot_reuse_its_embedded_previous_frame_citations():
                     "kind": "screen",
                     "evidence_id": snapshot_id,
                     "text": "## [f_000000] 原图第1页\n\n保留导航。\n人工补充：蓝莓网格390。",
+                    "configured_model": "not-content",
+                    "finish_reason": "stop",
                 },
             }
         }
@@ -133,3 +159,9 @@ def test_registered_text_cannot_reuse_its_embedded_previous_frame_citations():
     assert result.status == "partial" and result.output["warnings"]
     assert result.output["available_evidence_refs"] == [snapshot_id]
     assert result.output["cited_evidence_refs"] == ["f_000000"]
+    payload = json.loads(prompts[0].split("资料JSON：\n", 1)[1])
+    assert payload["allowed_citations"] == [{"evidence_id": snapshot_id, "kind": "screen", "status": "ready"}]
+    source = payload["evidence"]["text_screen"]["evidence"]
+    assert "[f_000000]" in source["text"] and "蓝莓网格390" in source["text"]
+    assert "configured_model" not in source and "finish_reason" not in source
+    assert "本次唯一可用证据编号表" in prompts[0]
