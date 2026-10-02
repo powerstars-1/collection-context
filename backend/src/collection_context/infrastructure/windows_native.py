@@ -1,9 +1,10 @@
 """Unconnected Windows x64 primitives, NOT an accepted SafeFiles/lease backend.
 
-Only existing local-drive objects can be opened and bounded file contents read.
+Existing local-drive objects can be opened and bounded file contents read.
 Existing lease metadata can be written under its own exclusive range lock; this
-is not atomic library publication. No creation, installation, arbitrary access
-masks, or fallback path IO are provided. DLLs load lazily on
+is not atomic library publication. A separate draft publication adapter creates
+private staging files and publishes verified contents. No installation, arbitrary
+access masks, or fallback path IO are provided. DLLs load lazily on
 real Windows x64; ``_dlls`` injection is for call/layout tests, never acceptance.
 Private ACL checks are a separate lazy adapter; neither draft selects Windows
 as an accepted public backend.
@@ -40,7 +41,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from collection_context.application.contracts import ContextError
 
 if TYPE_CHECKING:
-    from collection_context.infrastructure.windows_security import WindowsPrivateSecurity
+    from collection_context.infrastructure.windows_security import PrivateCreation, WindowsPrivateSecurity
 
 # Windows LLP64, including UTF-16 WCHAR, regardless of the test host's C ABI.
 U16 = ctypes.c_uint16
@@ -114,7 +115,9 @@ class Overlapped(ctypes.Structure):
     _fields_ = [("Internal", U64), ("InternalHigh", U64), ("Position", _OffsetUnion), ("hEvent", HANDLE)]
 
 
-Role = Literal["directory", "read_file", "lease_file", "lease_observer"]
+Role = Literal["directory", "read_file", "lease_file", "lease_observer", "publication_file"]
+# Publication handles can only originate in exclusive private creation. They
+# cannot be requested by open_relative for an arbitrary existing file.
 _ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer"})
 _OBJ_CASE_INSENSITIVE = 0x40
 _OBJ_DONT_REPARSE = 0x1000
@@ -405,6 +408,8 @@ class WindowsNative:
         unsigned = int(status) & 0xFFFFFFFF
         if unsigned in {0xC0000034, 0xC000003A, 0xC000000F}:
             return ContextError("not_found", "受控文件不存在。")
+        if unsigned == 0xC0000035:  # STATUS_OBJECT_NAME_COLLISION
+            return ContextError("write_conflict", "目标已存在，未覆盖原文件。")
         if unsigned in {0xC000050B, 0xC0000279, 0x8000002D, 0xC0000022}:
             return ContextError("forbidden_path", "原生文件边界或访问检查拒绝。")
         if unsigned == 0xC0000043:
@@ -430,7 +435,14 @@ class WindowsNative:
         self.information(parent)
         return self._open(component, parent, role)
 
-    def _open(self, name: str, parent: NativeHandle | None, role: Role) -> NativeHandle:
+    def _open(
+        self,
+        name: str,
+        parent: NativeHandle | None,
+        role: Role,
+        *,
+        _creation: PrivateCreation | None = None,
+    ) -> NativeHandle:
         dlls = self._libraries()
         buffer, string = _utf16_name(name)
         attributes = ObjectAttributes(
@@ -438,16 +450,28 @@ class WindowsNative:
             self._value(parent) if parent is not None else None,
             ctypes.pointer(string),
             _OBJ_CASE_INSENSITIVE | _OBJ_DONT_REPARSE,
-            None,
+            _creation.pointer if _creation is not None else None,
             None,
         )
         access = _SYNCHRONIZE | _READ_CONTROL | _FILE_READ_ATTRIBUTES
         access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
-        if role == "lease_file":
+        if role in {"lease_file", "publication_file"}:
             # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
-            # WRITE_DATA. This fixed role never requests DELETE/WRITE_DAC.
+            # WRITE_DATA. Neither role requests WRITE_DAC; lease has no DELETE.
             access |= 0x40000000
-        shares = {"directory": 3, "read_file": 1, "lease_file": 7, "lease_observer": 7}[role]
+        if role == "publication_file":
+            if _creation is None or parent is None:
+                raise ContextError("forbidden_path", "发布句柄只能由私有排他创建获得。")
+            access |= 0x10000  # DELETE for handle-relative rename, never WRITE_DAC.
+        elif _creation is not None:
+            raise ContextError("forbidden_path", "创建权限与固定文件角色不匹配。")
+        shares = {
+            "directory": 3,
+            "read_file": 1,
+            "lease_file": 7,
+            "lease_observer": 7,
+            "publication_file": 0,
+        }[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT
         options |= _FILE_DIRECTORY_FILE if role == "directory" else _FILE_NON_DIRECTORY_FILE
         output, io = HANDLE(), IoStatusBlock()
@@ -459,10 +483,10 @@ class WindowsNative:
             None,
             0,
             shares,
-            1,
+            2 if _creation is not None else 1,
             options,
             None,
-            0,  # FILE_OPEN only; never create/truncate
+            0,  # FILE_CREATE is exclusive; never OPEN_IF/OVERWRITE/SUPERSEDE.
         )
         # Keep the explicit UTF-16 backing buffer alive through the native call.
         del buffer
@@ -478,6 +502,8 @@ class WindowsNative:
             if not dlls.kernel32.SetHandleInformation(output, 1, 0):
                 raise ContextError("storage_unavailable", "无法清除文件句柄继承标志。")
             handle._identity = self.information(handle).identity
+            if _creation is not None and (io.Information != 2 or io.Result.Status != 0):
+                raise ContextError("storage_unavailable", "原生排他创建结果不能确认。")
             return handle
         except BaseException:
             handle.close()
@@ -541,14 +567,16 @@ class WindowsNative:
         Private reads explicitly require the ACL adapter both before and after
         reading. An unchecked read is never inferred to be a private-file proof.
         """
-        if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_NATIVE_READ:
+        # Default matches SafeFiles; callers can explicitly read larger runtime
+        # archives/weights. Buffers remain chunked; do not silently cap at 16 MB.
+        if type(max_bytes) is not int or not 0 <= max_bytes <= (1 << 63) - 2:
             raise ContextError("invalid_argument", "原生读取大小上限无效。")
         if type(private) is not bool:
             raise ContextError("invalid_argument", "原生读取权限标志无效。")
         self._value(handle)
-        if handle.role not in {"read_file", "lease_file", "lease_observer"}:
+        if handle.role not in {"read_file", "lease_file", "lease_observer", "publication_file"}:
             raise ContextError("forbidden_path", "只允许读取固定文件角色的句柄。")
-        limit = min(max_bytes, 65_536) if handle.role != "read_file" else max_bytes
+        limit = min(max_bytes, 65_536) if handle.role in {"lease_file", "lease_observer"} else max_bytes
         with handle._io_lock:
             before = self.information(handle)
             if before.size > limit:
@@ -691,8 +719,11 @@ class WindowsNative:
 
     def require_private_security(self, handle: NativeHandle) -> None:
         self._value(handle)
+        self.private_security().require_private(handle)
+
+    def private_security(self) -> WindowsPrivateSecurity:
         if self._security is None:
             from collection_context.infrastructure.windows_security import WindowsPrivateSecurity
 
             self._security = WindowsPrivateSecurity(self)
-        self._security.require_private(handle)
+        return self._security

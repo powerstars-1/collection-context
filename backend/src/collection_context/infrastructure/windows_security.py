@@ -21,12 +21,45 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.windows_native import HANDLE, I32, U32, NativeHandle, WindowsNative
+from collection_context.infrastructure.windows_native import (
+    HANDLE,
+    I32,
+    U16,
+    U32,
+    NativeHandle,
+    WindowsNative,
+)
 
 MAX_DESCRIPTOR = 65_536
 MAX_TOKEN_USER = 4096
 _SYSTEM = bytes.fromhex("010100000000000512000000")  # S-1-5-18
 _ADMINISTRATORS = bytes.fromhex("01020000000000052000000020020000")  # S-1-5-32-544
+
+
+class AbsoluteDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("Revision", ctypes.c_ubyte),
+        ("Reserved", ctypes.c_ubyte),
+        ("Control", U16),
+        ("Owner", HANDLE),
+        ("Group", HANDLE),
+        ("Sacl", HANDLE),
+        ("Dacl", HANDLE),
+    ]
+
+
+@dataclass(repr=False)
+class PrivateCreation:
+    """Keep every native pointer's backing allocation alive through creation."""
+
+    descriptor: AbsoluteDescriptor
+    acl: Any
+    sids: tuple[Any, ...]
+    user: bytes
+
+    @property
+    def pointer(self) -> int:
+        return ctypes.addressof(self.descriptor)
 
 
 def _unsafe() -> ContextError:
@@ -141,6 +174,7 @@ def private_descriptor(body: bytes, current_user: bytes) -> PrivateDescriptor:
 class WindowsPrivateSecurity:
     def __init__(self, owner: WindowsNative, *, _dll: Any = None):
         self.owner, self._dll, self._bound = owner, _dll, False
+        self._creation_bound = False
 
     def _libraries(self):
         base = self.owner._libraries()
@@ -256,3 +290,60 @@ class WindowsPrivateSecurity:
             after = self.owner.information(handle)
             if before != after or policy != after_policy:
                 raise ContextError("version_changed", "权限或对象版本在核对期间变化；未继续操作。")
+
+    def creation_descriptor(self, *, directory: bool = False) -> PrivateCreation:
+        """Explicit protected DACL for a new object; never repair an existing ACL.
+
+        Construct with documented security APIs, not a caller-supplied descriptor
+        or default/inherited ACL. This does not select the Windows public backend.
+        https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-initializesecuritydescriptor
+        https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-addaccessallowedaceex
+        https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-setsecuritydescriptorcontrol
+        """
+        if type(directory) is not bool:
+            raise ContextError("invalid_argument", "新对象权限类型无效。")
+        if ctypes.sizeof(AbsoluteDescriptor) != 40 or AbsoluteDescriptor.Owner.offset != 8:
+            raise _unavailable()
+        _, api = self._libraries()
+        if not self._creation_bound:
+            signatures = [
+                ("InitializeSecurityDescriptor", [HANDLE, U32]),
+                ("InitializeAcl", [HANDLE, U32, U32]),
+                ("AddAccessAllowedAceEx", [HANDLE, U32, U32, U32, HANDLE]),
+                ("SetSecurityDescriptorOwner", [HANDLE, HANDLE, I32]),
+                ("SetSecurityDescriptorDacl", [HANDLE, I32, HANDLE, I32]),
+                ("SetSecurityDescriptorControl", [HANDLE, U16, U16]),
+                ("IsValidSecurityDescriptor", [HANDLE]),
+            ]
+            try:
+                for name, arguments in signatures:
+                    function = getattr(api, name)
+                    function.restype, function.argtypes = I32, arguments
+            except AttributeError:
+                raise _unavailable() from None
+            self._creation_bound = True
+        user = self.current_user()
+        trustees = (user, _SYSTEM, _ADMINISTRATORS)
+        sids = tuple(ctypes.create_string_buffer(sid, len(sid)) for sid in trustees)
+        size = 8 + sum(8 + len(sid) for sid in trustees)
+        acl = ctypes.create_string_buffer(size)
+        descriptor = AbsoluteDescriptor()
+        if not api.InitializeSecurityDescriptor(ctypes.byref(descriptor), 1) or not api.InitializeAcl(
+            acl, size, 2
+        ):
+            raise _unavailable()
+        for sid in sids:
+            # Full object access for only these trustees. No implicit Everyone,
+            # Users, CREATOR_OWNER, SACL or privilege-dependent operation.
+            if not api.AddAccessAllowedAceEx(acl, 2, 3 if directory else 0, 0x001F01FF, sid):
+                raise _unavailable()
+        if (
+            not api.SetSecurityDescriptorOwner(ctypes.byref(descriptor), sids[0], 0)
+            or not api.SetSecurityDescriptorDacl(ctypes.byref(descriptor), 1, acl, 0)
+            or not api.SetSecurityDescriptorControl(ctypes.byref(descriptor), 0x1000, 0x1000)
+            or not api.IsValidSecurityDescriptor(ctypes.byref(descriptor))
+        ):
+            raise _unavailable()
+        if self.current_user() != user:
+            raise ContextError("version_changed", "创建权限时运行身份变化；没有创建对象。")
+        return PrivateCreation(descriptor, acl, sids, user)

@@ -56,11 +56,25 @@ def test_chunked_binary_empty_and_short_reads(file, body, short_read):
     assert max(capacity for _, capacity, _ in dlls.reads) <= 65_536
 
 
-@pytest.mark.parametrize("limit", [-1, True, 1.5, "20", None, native.MAX_NATIVE_READ + 1])
+@pytest.mark.parametrize("limit", [-1, True, 1.5, "20", None, (1 << 63) - 1])
 def test_invalid_cap_never_allocates_or_reaches_io(file, limit):
     dlls, leaf = file
     assert code(lambda: dlls.native.read_file(leaf, max_bytes=limit)) == "invalid_argument"
     assert not dlls.seeks and not dlls.reads
+
+
+def test_explicit_large_budget_does_not_silently_shrink_to_default(file):
+    dlls, leaf = file
+    assert dlls.native.read_file(leaf, max_bytes=128_000_000) == b"fixture-body"
+
+
+def test_runtime_sized_body_can_exceed_default_with_explicit_budget(file):
+    dlls, leaf = file
+    body = b"x" * (native.MAX_NATIVE_READ + 1)
+    content(dlls, leaf, body)
+    assert code(lambda: dlls.native.read_file(leaf)) == "forbidden_path"
+    assert dlls.native.read_file(leaf, max_bytes=128_000_000) == body
+    assert max(capacity for _, capacity, _ in dlls.reads) <= 65_536
 
 
 def test_oversized_metadata_rejected_before_seek_or_read(file):
