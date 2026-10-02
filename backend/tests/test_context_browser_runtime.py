@@ -88,6 +88,103 @@ def test_explicit_browser_role_and_absolute_executable(runtime, sdk, tmp_path, h
     assert sdk[-2:] == ["context_closed", "runtime_stopped"]
 
 
+def remove_role(runtime, role):
+    receipt = runtime / registry.RECEIPT_NAME
+    payload = json.loads(receipt.read_text())
+    del payload["tools"][role]
+    receipt.write_text(json.dumps(payload))
+
+
+def test_headless_reuses_only_receipt_validated_chromium_when_shell_role_absent(runtime, sdk, tmp_path):
+    remove_role(runtime, "chromium_headless_shell")
+    # Even an unrelated shell file must not be discovered or executed.
+    (runtime / "chromium_headless_shell").write_bytes(b"unregistered shell")
+    with BrowserSession(tmp_path / "profile", runtime_dir=runtime, library_dir=tmp_path / "library"):
+        pass
+    assert sdk[1][2]["headless"] is True
+    assert sdk[1][2]["executable_path"] == str(runtime / "chromium")
+    assert sdk[-2:] == ["context_closed", "runtime_stopped"]
+
+
+@pytest.mark.parametrize(
+    ("corruption", "expected_code"),
+    [
+        ("missing_file", "runtime_dependency_missing"),
+        ("hash", "runtime_dependency_integrity"),
+        ("binding", "runtime_dependency_version_mismatch"),
+    ],
+)
+def test_declared_bad_shell_never_falls_back_to_valid_chromium(
+    runtime, sdk, tmp_path, corruption, expected_code
+):
+    if corruption == "missing_file":
+        (runtime / "chromium_headless_shell").unlink()
+    elif corruption == "hash":
+        # Preserve size so the failing boundary is the digest, not the length.
+        path = runtime / "chromium_headless_shell"
+        path.write_bytes(b"x" * path.stat().st_size)
+    else:
+        receipt = runtime / registry.RECEIPT_NAME
+        payload = json.loads(receipt.read_text())
+        for tool in payload["tools"].values():
+            tool["playwright"]["package_version"] = "different-package"
+        receipt.write_text(json.dumps(payload))
+    profile = tmp_path / "untouched-profile"
+    with pytest.raises(ContextError) as caught:
+        with BrowserSession(profile, runtime_dir=runtime, library_dir=tmp_path / "library"):
+            pass
+    assert caught.value.code == expected_code
+    assert sdk == [] and not profile.exists()
+
+
+def test_absent_shell_does_not_bypass_invalid_chromium_or_missing_both_roles(runtime, sdk, tmp_path):
+    remove_role(runtime, "chromium_headless_shell")
+    (runtime / "chromium").unlink()
+    with pytest.raises(ContextError) as caught:
+        with BrowserSession(tmp_path / "profile", runtime_dir=runtime, library_dir=tmp_path / "library"):
+            pass
+    assert caught.value.code == "runtime_dependency_missing"
+    assert sdk == [] and not (tmp_path / "profile").exists()
+    remove_role(runtime, "chromium")
+    with pytest.raises(ContextError) as caught:
+        with BrowserSession(tmp_path / "profile", runtime_dir=runtime, library_dir=tmp_path / "library"):
+            pass
+    assert caught.value.code == "runtime_dependency_missing"
+    assert sdk == [] and not (tmp_path / "profile").exists()
+
+
+@pytest.mark.parametrize("changed_at", [2, 3])
+@pytest.mark.parametrize("initial_shell", [False, True])
+def test_role_set_changes_during_start_do_not_switch_browser(
+    runtime, sdk, tmp_path, monkeypatch, changed_at, initial_shell
+):
+    receipt = runtime / registry.RECEIPT_NAME
+    original = json.loads(receipt.read_text())
+    if not initial_shell:
+        remove_role(runtime, "chromium_headless_shell")
+    read = registry.RuntimeDependencies._receipt
+    selections = 0
+
+    def changing(self):
+        nonlocal selections
+        # Each selection reads the receipt once, and resolve reads it again.
+        selections += 1
+        if selections == 2 * changed_at - 1:
+            payload = json.loads(json.dumps(original))
+            if initial_shell:
+                del payload["tools"]["chromium_headless_shell"]
+            receipt.write_text(json.dumps(payload))
+        return read(self)
+
+    monkeypatch.setattr(registry.RuntimeDependencies, "_receipt", changing)
+    with pytest.raises(ContextError) as caught:
+        with BrowserSession(tmp_path / "profile", runtime_dir=runtime, library_dir=tmp_path / "library"):
+            pass
+    assert caught.value.code == "runtime_dependency_integrity"
+    assert not any(isinstance(event, tuple) and event[0] == "launch" for event in sdk)
+    assert sdk == ([] if changed_at == 2 else ["sdk_started", "runtime_stopped"])
+
+
 @pytest.mark.parametrize("corruption", ["missing", "hash", "binding"])
 def test_bad_receipt_starts_no_sdk_and_creates_no_profile(runtime, sdk, tmp_path, monkeypatch, corruption):
     profile = tmp_path.resolve() / "untouched-profile"

@@ -6,10 +6,12 @@ from typing import Any
 
 from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError, envelope
+from collection_context.application.model_recovery import ModelRecovery
 from collection_context.application.model_setup import ModelSetup
 from collection_context.application.source_management import SourceManagement
 from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.library.store import LibraryStore
+from collection_context.processing.inputs import PreparedInputs
 from collection_context.workflows.addition import AdditionWorkflow
 from collection_context.workflows.extraction import ExtractionWorkflow
 from collection_context.workflows.jobs import JobManager
@@ -55,7 +57,7 @@ class ManagementService:
             "jobs": [self._public_job(j) for j in jobs[offset : offset + 20]],
             "total_jobs": len(jobs),
             "next_offset": offset + 20 if offset + 20 < len(jobs) else None,
-            "prepared": prepared[offset : offset + 20],
+            "prepared": [self._prepared(value) for value in prepared[offset : offset + 20]],
             "total_prepared": len(prepared),
             "next_prepared_offset": offset + 20 if offset + 20 < len(prepared) else None,
             "execution": "separately_authorized_worker",
@@ -65,6 +67,18 @@ class ManagementService:
     @staticmethod
     def _automatic(value: dict[str, Any]) -> dict[str, Any]:
         return {**value, "paused_job_ids": value["paused_job_ids"][:20]}
+
+    def _prepared(self, value: dict[str, Any]) -> dict[str, Any]:
+        try:
+            media = PreparedInputs(self.store).load(value["input_id"])
+            return {
+                **value,
+                "audio_segments": len(media["audio"]),
+                "visual_frames": len(media["frames"]),
+                "planned_calls_before_reuse": len(media["audio"]) + len(media["frames"]) + 1,
+            }
+        except ContextError as error:
+            return {**value, "planned_calls_before_reuse": None, "preparation_error": error.code}
 
     @staticmethod
     def _public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -82,6 +96,11 @@ class ManagementService:
             ),
             "stages": {name: stage["state"] for name, stage in job["stages"].items()},
             "error_code": job["error"]["code"] if job["error"] else None,
+            "attempt": job.get("attempt", 1),
+            "parent_job_id": job.get("recovery", {}).get("parent_job_id"),
+            "can_retry": job["kind"] == "process"
+            and "extraction" in job["payload"]
+            and job["state"] in {"partial", "failed", "cancelled", "blocked"},
         }
         if job["kind"] == "add":
             value = job["stages"].get("link_import", {}).get("result") or {}
@@ -157,6 +176,29 @@ class ManagementService:
                     {"input_ids", "idempotency_key", "max_calls", "fee_confirmed"},
                 ),
                 "cancel": ({"job_id"}, {"job_id"}),
+                "retry-preview": ({"job_id"}, {"job_id", "stages"}),
+                "retry": (
+                    {
+                        "job_id",
+                        "stages",
+                        "preview_token",
+                        "idempotency_key",
+                        "max_calls",
+                        "fee_confirmed",
+                        "reviewed_call_ids",
+                        "duplicate_charge_confirmed",
+                    },
+                    {
+                        "job_id",
+                        "stages",
+                        "preview_token",
+                        "idempotency_key",
+                        "max_calls",
+                        "fee_confirmed",
+                        "reviewed_call_ids",
+                        "duplicate_charge_confirmed",
+                    },
+                ),
                 "resume-preview": ({"job_ids"}, {"job_ids"}),
                 "resume": (
                     {"job_ids", "preview_token", "fee_confirmed"},
@@ -229,6 +271,10 @@ class ManagementService:
                 }
             elif action == "cancel":
                 result = self._public_job(JobManager(self.store).cancel(args["job_id"]))
+            elif action == "retry-preview":
+                result = ModelRecovery(self.store).preview(**args)
+            elif action == "retry":
+                result = self._public_job(ModelRecovery(self.store).retry(**args))
             elif action == "resume-preview":
                 result = self.schedule.resume_preview(**args)
             else:

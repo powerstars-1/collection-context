@@ -190,3 +190,50 @@ def test_empty_selection_does_not_claim_ocr_success():
     value = select()
     assert value.coverage()["ocr_state"] == "not_applied"
     assert value.coverage()["ocr_calls"] == 0 and value.coverage()["complete"] is False
+
+
+def test_returning_page_reuses_exact_visual_and_preserves_each_occurrence():
+    value = select()
+    other = png(color=(40, 51, 60, 255))
+    for frame in (page(0, reasons=("first",)), page(1, data=other), page(2), page(3, data=other)):
+        value.feed(frame)
+    assert len(value.engine.calls) == 2
+    assert [frame.candidate.evidence_id for frame in value.frames] == ["f_000000", "f_000001"]
+    assert [record["duplicate_of"] for record in value.records] == [None, None, "f_000000", "f_000001"]
+    assert [record["nominal_seconds"] for record in value.records] == [0, 1, 2, 3]
+    assert [record["evidence_id"] for record in value.records] == [f"f_{index:06}" for index in range(4)]
+
+
+def test_returning_page_anchor_updates_only_its_own_pixel_reference():
+    value = select()
+    other = png(color=(41, 50, 60, 255))
+    for frame in (
+        page(0),
+        page(1, data=other),
+        page(2, reasons=("coverage_anchor",)),
+        page(3, data=other),
+        page(4),
+    ):
+        value.feed(frame)
+    assert [frame.candidate.evidence_id for frame in value.frames] == ["f_000000", "f_000001", "f_000002"]
+    assert [record["duplicate_of"] for record in value.records[-2:]] == ["f_000001", "f_000002"]
+    assert len(value.engine.calls) == 2
+
+
+def test_repeated_failure_is_not_cached_across_distinct_pages():
+    value = select(outputs=[ContextError("ocr_failed", "original failure"), result(), result()])
+    for frame in (page(0), page(1, data=png(color=(41, 50, 60, 255))), page(2)):
+        value.feed(frame)
+    assert len(value.engine.calls) == 3 and len(value.frames) == 3
+    assert value.records[2]["ocr_reused"] is False
+
+
+def test_corrupt_crc_blocks_before_ocr_even_if_pixels_might_load():
+    data = bytearray(png())
+    end = data.index(b"IEND") + 4
+    data[end] ^= 1
+    value = select()
+    with pytest.raises(ContextError) as caught:
+        value.feed(page(0, data=bytes(data)))
+    assert caught.value.code == "ocr_image_invalid"
+    assert value.engine.calls == [] and value.records == []

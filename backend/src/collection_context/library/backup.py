@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 import uuid
@@ -117,6 +118,46 @@ def _add_file(files: dict[str, bytes], path: str, body: bytes) -> None:
         raise ContextError("backup_path_conflict", "备份中同一路径对应不同内容。")
 
 
+def _result_references(state: dict[str, Any]) -> dict[str, str]:
+    """Include confirmed call and local-stage snapshots, not unrelated result files."""
+    references: dict[str, str] = {}
+    try:
+        for job in state["jobs"].values():
+            calls, stages = job.get("calls", []), job.get("stages", {})
+            if not isinstance(calls, list) or not isinstance(stages, dict):
+                raise ValueError
+            for entry in [*calls, *stages.values()]:
+                if not isinstance(entry, dict):
+                    raise ValueError
+                descriptor = entry.get("result")
+                if descriptor is None:
+                    continue
+                if not isinstance(descriptor, dict) or set(descriptor) != {"call_id", "path", "sha256"}:
+                    raise ValueError
+                identity = valid_id(descriptor["call_id"])
+                path, sha = descriptor["path"], descriptor["sha256"]
+                if (
+                    path != f".context/请求结果/{identity}.json"
+                    or not isinstance(sha, str)
+                    or re.fullmatch(r"[a-f0-9]{64}", sha) is None
+                    or path in references
+                    and references[path] != sha
+                ):
+                    raise ValueError
+                references[path] = sha
+        return references
+    except (KeyError, TypeError, ValueError, AttributeError, ContextError):
+        raise ContextError("corrupt_call_result", "任务结果引用不完整；未生成可恢复备份。") from None
+
+
+def _verify_result(body: bytes, sha: str) -> None:
+    try:
+        if len(body) > 2_000_000 or _sha256(body) != sha or not isinstance(json.loads(body), dict):
+            raise ValueError
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise ContextError("corrupt_call_result", "任务结果快照不完整；未丢弃记录或重新调用模型。") from None
+
+
 def _collect_files(
     store: LibraryStore, state: dict[str, Any], *, include_media: bool
 ) -> tuple[dict[str, bytes], list[dict[str, Any]], list[dict[str, str]], dict[str, str]]:
@@ -126,6 +167,10 @@ def _collect_files(
     entry_gaps: list[dict[str, str]] = []
     generated_entries = FileIndex(store).generated_entries()
     retained_tracking: dict[str, str] = {}
+    for path, sha in _result_references(state).items():
+        body = store.files.read(path, max_bytes=2_000_000)
+        _verify_result(body, sha)
+        _add_file(files, path, body)
     for ref, item in state["items"].items():
         if valid_id(ref) != item.get("id"):
             raise ContextError("invalid_input", "条目身份与资料键不一致；未生成备份。")
@@ -453,6 +498,12 @@ def _validate_references(
                 ):
                     raise ValueError
                 expected.add(blob_path)
+        for path, sha in _result_references(state).items():
+            body = files.get(path)
+            if body is None:
+                raise ValueError
+            _verify_result(body, sha)
+            expected.add(path)
         if (
             expected != set(files)
             or not isinstance(generated_entries, dict)

@@ -14,6 +14,7 @@ from collection_context.library.backup import create_backup, restore_backup
 from collection_context.library.backup_cli import main
 from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
+from collection_context.workflows.executor import DurableExecutor, Stage, StageOutcome
 from collection_context.workflows.jobs import JobManager
 
 
@@ -93,6 +94,92 @@ def register_media(store, item):
 
     store.transact(save)
     return blob_path, data
+
+
+@pytest.mark.parametrize("media_scope", ["all", "none"])
+@pytest.mark.parametrize("paid", [True, False])
+def test_backup_restores_confirmed_results_and_reuses_without_a_new_call(store, tmp_path, media_scope, paid):
+    invocations = []
+    stages = [
+        Stage(
+            "summary",
+            "fixed-input",
+            "fixed-prompt",
+            lambda _: (
+                invocations.append("dispatch")
+                or StageOutcome({"text": "已完成的原创结果"}, usage={"total_tokens": 13})
+            ),
+            paid=paid,
+        )
+    ]
+    executor = DurableExecutor(store)
+    original = executor.run(executor.submit(stages, idempotency_key="original", max_calls=1)["id"], stages)
+    assert original["state"] == "succeeded" and invocations == ["dispatch"]
+    descriptor = original["stages"]["summary"]["result"]
+    expected = JobManager(store).read_result(descriptor)
+    # An orphan result file is not an authority to widen the backup scope.
+    store.files.write(".context/请求结果/x_unreferenced.json", b'{"not_referenced":true}')
+    archive = tmp_path / "results.zip"
+    create_backup(store, archive, media_scope=media_scope)
+    with zipfile.ZipFile(archive) as package:
+        assert "files/" + descriptor["path"] in package.namelist()
+        assert "files/.context/请求结果/x_unreferenced.json" not in package.namelist()
+    destination = tmp_path / "restored-results"
+    restore_backup(archive, destination)
+    restored = LibraryStore(destination)
+    try:
+        assert JobManager(restored).read_result(descriptor) == expected
+        assert JobManager(restored).get(original["id"])["calls"] == original["calls"]
+        resumed = DurableExecutor(restored)
+        cached = resumed.run(
+            resumed.submit(stages, idempotency_key="after-restore", max_calls=0)["id"], stages
+        )
+        assert cached["state"] == "succeeded" and cached["calls"] == []
+        assert invocations == ["dispatch"]
+    finally:
+        restored.close()
+
+
+def test_backup_rejects_damaged_confirmed_result_instead_of_losing_the_cache(store, tmp_path):
+    executor = DurableExecutor(store)
+    stages = [Stage("audio", "input", "processor", lambda _: StageOutcome({"text": "原创"}), paid=True)]
+    job = executor.run(executor.submit(stages, idempotency_key="confirmed", max_calls=1)["id"], stages)
+    path = job["stages"]["audio"]["result"]["path"]
+    store.files.write(path, b'{"changed":true}', replace=True)
+    output = tmp_path / "must-not-publish.zip"
+    fails("corrupt_call_result", lambda: create_backup(store, output, media_scope="all"))
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("damage", ["missing", "changed"])
+def test_restore_rejects_lost_result_even_with_updated_archive_manifest(store, tmp_path, damage):
+    executor = DurableExecutor(store)
+    stages = [Stage("audio", "input", "processor", lambda _: StageOutcome({"text": "原创"}), paid=True)]
+    job = executor.run(executor.submit(stages, idempotency_key="confirmed", max_calls=1)["id"], stages)
+    source = tmp_path / "source.zip"
+    create_backup(store, source, media_scope="none")
+    with zipfile.ZipFile(source) as package:
+        members = {name: package.read(name) for name in package.namelist()}
+    result_member = FILES_PREFIX + job["stages"]["audio"]["result"]["path"]
+    if damage == "missing":
+        members.pop(result_member)
+    else:
+        members[result_member] = b'{"changed":true}'
+    manifest = json.loads(members["backup-manifest.json"])
+    manifest["files"] = [
+        {"path": name[len(FILES_PREFIX) :], "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+        for name, body in members.items()
+        if name.startswith(FILES_PREFIX)
+    ]
+    manifest["file_count"] = len(manifest["files"])
+    manifest["total_bytes"] = sum(record["bytes"] for record in manifest["files"])
+    damaged = tmp_path / "lost-result.zip"
+    with zipfile.ZipFile(damaged, "w", compression=zipfile.ZIP_STORED) as package:
+        for name, body in members.items():
+            package.writestr(name, canonical_bytes(manifest) if name == "backup-manifest.json" else body)
+    destination = tmp_path / "not-published"
+    fails("backup_invalid", lambda: restore_backup(damaged, destination))
+    assert not destination.exists()
 
 
 def test_content_commits_maintain_index_and_readable_entry_without_read_writes(store):

@@ -18,6 +18,7 @@ from collection_context.infrastructure.media import (
     LocalMedia,
     MediaPolicy,
     PreparedFrame,
+    validate_raster,
 )
 from collection_context.infrastructure.runtime_dependencies import RuntimeDependencies
 from collection_context.infrastructure.runtime_ocr import load_runtime_ocr
@@ -25,6 +26,7 @@ from collection_context.library.store import LibraryStore
 from collection_context.processing.ocr_selection import OCR_SELECTION_VERSION, OcrFrameSelection
 
 MAX_TOTAL = 512_000_000
+IMAGE_PROCESSOR_VERSION = "original_image_pages_v2"
 # The 2 fps decoder probe remains a baseline, not the product's extraction policy.
 # Authored 0.2-second critical-page regressions require a denser input grid.
 DEFAULT_VIDEO_POLICY = MediaPolicy(sample_fps=10, max_sampled_frames=72_002)
@@ -156,6 +158,21 @@ class PreparedInputs:
         )
         if total > MAX_TOTAL:
             raise ContextError("media_input_limit", "媒体快照总大小超出本批登记上限；未静默裁剪。")
+        # Validate the complete batch before the first blob write. One broken
+        # original/page must not leave a partly persisted or model-ready batch.
+        verified_images: set[tuple[str, str]] = set()
+        for frame in frames:
+            if not isinstance(frame.data, bytes) or frame.sha256 != hashlib.sha256(frame.data).hexdigest():
+                raise ContextError("media_changed", "画面哈希与输入不同。")
+        for data, mime in (originals if kind == "image" else []) + [
+            (frame.data, frame.mime_type) for frame in frames
+        ]:
+            if not isinstance(data, bytes) or not isinstance(mime, str):
+                raise ContextError("invalid_input", "原图或关键帧的输入类型无效。")
+            fingerprint = (hashlib.sha256(data).hexdigest(), mime)
+            if fingerprint not in verified_images:
+                validate_raster(data, expected_mime=mime)
+                verified_images.add(fingerprint)
         payload: dict[str, Any] = {
             "schema_version": 1,
             "material_ref": ref,
@@ -415,7 +432,7 @@ class PreparedInputs:
             or current.get("source_asset_hash") != source_asset_hash
         ):
             raise ContextError("version_changed", "来源媒体在核对期间变化，未复用旧快照。")
-        version = PROCESSOR_VERSION if payload["kind"] == "video" else "original_image_pages_v1"
+        version = PROCESSOR_VERSION if payload["kind"] == "video" else IMAGE_PROCESSOR_VERSION
         if payload["processor_version"] != version:
             return None
         return identity
@@ -458,7 +475,7 @@ class PreparedInputs:
         ]
 
     def frames(self, payload: dict[str, Any]) -> list[PreparedFrame]:
-        return [
+        frames = [
             PreparedFrame(
                 FrameCandidate(**{**frame["candidate"], "reasons": tuple(frame["candidate"]["reasons"])}),
                 self._read_blob(payload["material_ref"], frame["blob"]),
@@ -468,6 +485,11 @@ class PreparedInputs:
             )
             for frame in payload["frames"]
         ]
+        # Old registries may predate full image validation. Refuse them before
+        # constructing any paid visual stage, rather than trusting magic bytes.
+        for frame in frames:
+            validate_raster(frame.data, expected_mime=frame.mime_type)
+        return frames
 
     def prepare_video(
         self,
@@ -589,7 +611,7 @@ class PreparedInputs:
                 "accuracy": "not_verified",
                 "selection": "all_original_pages",
             },
-            processor_version="original_image_pages_v1",
-            strategy_hash=digest(["all_original_pages_v1", len(images)]),
+            processor_version=IMAGE_PROCESSOR_VERSION,
+            strategy_hash=digest(["all_original_pages_v2", len(images)]),
             kind="image",
         )

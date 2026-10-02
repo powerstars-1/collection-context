@@ -6,6 +6,7 @@ from typing import Any
 
 from collection_context.application.contracts import ContextError, valid_id
 from collection_context.application.service import ContextService
+from collection_context.infrastructure.media import validate_raster
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 
@@ -13,13 +14,7 @@ MAX_IMAGE_BYTES = 8_000_000
 
 
 def raster_mime(data: bytes) -> str:
-    if data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    raise ContextError("unsupported_media", "画面不是已支持的栅格图片，未作为网页内容返回。")
+    return validate_raster(data, max_bytes=MAX_IMAGE_BYTES).mime_type
 
 
 class MediaEvidence:

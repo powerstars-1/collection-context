@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 import wave
+import zlib
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -22,8 +23,100 @@ from collection_context.application.contracts import ContextError, digest
 
 THUMB_WIDTH, THUMB_HEIGHT = 160, 90
 THUMB_BYTES = THUMB_WIDTH * THUMB_HEIGHT
-PROCESSOR_VERSION = "local_media_v4"
+PROCESSOR_VERSION = "local_media_v5"
 FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm"
+MAX_RASTER_PIXELS = 33_177_600
+MAX_RASTER_BYTES = 32_000_000
+
+
+@dataclass(frozen=True)
+class RasterInfo:
+    mime_type: str
+    width: int
+    height: int
+    pixel_sha256: str | None = None
+
+
+def _png_integrity(data: bytes) -> None:
+    """Pillow does not verify the final IEND checksum or reject trailing chunks."""
+    offset, first, seen_data = 8, True, False
+    while offset + 12 <= len(data):
+        length = int.from_bytes(data[offset : offset + 4], "big")
+        end = offset + length + 12
+        if end > len(data):
+            break
+        kind = data[offset + 4 : offset + 8]
+        if first and (kind != b"IHDR" or length != 13):
+            break
+        if not first and kind == b"IHDR":
+            break
+        if zlib.crc32(data[offset + 4 : end - 4]) != int.from_bytes(data[end - 4 : end], "big"):
+            break
+        if kind == b"IEND":
+            if length == 0 and end == len(data) and seen_data:
+                return
+            break
+        seen_data = seen_data or kind == b"IDAT"
+        offset, first = end, False
+    raise ValueError("incomplete PNG")
+
+
+def validate_raster(
+    data: bytes,
+    *,
+    expected_mime: str | None = None,
+    max_bytes: int = MAX_RASTER_BYTES,
+    max_pixels: int = MAX_RASTER_PIXELS,
+    pixel_hash: bool = False,
+) -> RasterInfo:
+    """Fully decode one bounded static raster, without OCR/model calls or global decoder changes.
+
+    Imported only on an actual media operation: ordinary text/library reads do not
+    require Pillow. Reject animations rather than treating only their first page as
+    the complete original or using it to deduplicate different moving images.
+    """
+    if not isinstance(data, bytes) or not 0 < len(data) <= max_bytes:
+        raise ContextError("media_input_limit", "图片为空或超过本次读取上限，未截断图片。")
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime, format_name = "image/png", "PNG"
+    elif data.startswith(b"\xff\xd8\xff"):
+        mime, format_name = "image/jpeg", "JPEG"
+    elif len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime, format_name = "image/webp", "WEBP"
+    else:
+        raise ContextError("unsupported_media", "画面不是已支持的PNG、JPEG或WebP栅格图片。")
+    if expected_mime is not None and mime != expected_mime:
+        raise ContextError("unsupported_media", "图片实际格式与登记类型不一致。")
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ContextError("media_dependency_missing", "图片完整性检查依赖尚未就绪，未跳过检查。") from None
+    try:
+        if format_name == "PNG":
+            _png_integrity(data)
+        elif format_name == "JPEG" and not data.endswith(b"\xff\xd9"):
+            raise ValueError("incomplete JPEG")
+        elif format_name == "WEBP" and int.from_bytes(data[4:8], "little") + 8 != len(data):
+            raise ValueError("incomplete WebP")
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > max_pixels:
+                raise ContextError("media_pixel_limit", "图片像素超过上限，未缩小原图后当作完整内容。")
+            if image.format != format_name or getattr(image, "is_animated", False):
+                raise ContextError("unsupported_media", "图片格式不一致或包含动画，未只取首帧当完整原图。")
+            image.verify()
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            pixels = (
+                hashlib.sha256(str(image.size).encode() + image.convert("RGBA").tobytes()).hexdigest()
+                if pixel_hash
+                else None
+            )
+        return RasterInfo(mime, width, height, pixels)
+    except ContextError:
+        raise
+    except Exception:
+        raise ContextError("media_image_invalid", "图片内容损坏或未完整解码，未作为有效画面使用。") from None
 
 
 @dataclass(frozen=True)
@@ -127,9 +220,15 @@ class PngFrames:
     """Bounded parser for a decoder's PNG stream; frame delivery never uses a second seek rule."""
 
     def __init__(
-        self, candidates: list[FrameCandidate], max_bytes: int, consumer: Callable[[PreparedFrame], None]
+        self,
+        candidates: list[FrameCandidate],
+        max_bytes: int,
+        consumer: Callable[[PreparedFrame], None],
+        *,
+        max_pixels: int = MAX_RASTER_PIXELS,
     ):
         self.candidates, self.max_bytes, self.consumer = candidates, max_bytes, consumer
+        self.max_pixels = max_pixels
         self.buffer = bytearray()
         self.offset = 0
         self.frame_count = 0
@@ -157,6 +256,9 @@ class PngFrames:
                 if length != 0 or self.frame_count >= len(self.candidates):
                     raise ContextError("media_decode_failed", "PNG 帧结束或数量与候选清单不符。")
                 frame = bytes(self.buffer[:end])
+                validate_raster(
+                    frame, expected_mime="image/png", max_bytes=self.max_bytes, max_pixels=self.max_pixels
+                )
                 self.consumer(
                     PreparedFrame(self.candidates[self.frame_count], frame, hashlib.sha256(frame).hexdigest())
                 )
@@ -623,7 +725,9 @@ class LocalMedia:
             raise ContextError("invalid_frame_reference", "候选帧必须按顺序排列且不能重复。")
         edge = self.policy.max_frame_edge
         select = "+".join(f"eq(n,{candidate.sample_index})" for candidate in candidates)
-        parser = PngFrames(candidates, self.policy.max_frame_bytes, consumer)
+        parser = PngFrames(
+            candidates, self.policy.max_frame_bytes, consumer, max_pixels=self.policy.max_pixels
+        )
         self._run(
             self.ffmpeg,
             [

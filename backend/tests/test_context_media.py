@@ -1,6 +1,7 @@
 """Original local media preparation, including limits and actual subprocess boundaries."""
 
 import base64
+import builtins
 import dataclasses
 import hashlib
 import io
@@ -23,6 +24,7 @@ from collection_context.infrastructure.media import (
     MediaPolicy,
     PngFrames,
     segment_ranges,
+    validate_raster,
 )
 
 
@@ -308,7 +310,7 @@ def test_scan_report_never_claims_ocr_or_exact_timestamps(monkeypatch):
 
 
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aM1kAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ0bD5DwACRAF4aig0hQAAAABJRU5ErkJggg=="
 )
 
 
@@ -354,3 +356,90 @@ def test_evidence_replays_scan_filter_and_index_instead_of_independent_seek(monk
         assert media._sample_filter() in filter_string
         assert "eq(n,3)" in filter_string
         assert "vfr" in commands[0]
+
+
+@pytest.mark.parametrize(
+    "format_name,mime", [("PNG", "image/png"), ("JPEG", "image/jpeg"), ("WEBP", "image/webp")]
+)
+def test_full_raster_decode_preserves_supported_original_bytes(format_name, mime):
+    from PIL import Image
+
+    stream = io.BytesIO()
+    Image.new("RGB", (23, 19), (20, 40, 60)).save(stream, format=format_name)
+    data = stream.getvalue()
+    checked = validate_raster(data, expected_mime=mime, pixel_hash=True)
+    assert checked.mime_type == mime and (checked.width, checked.height) == (23, 19)
+    assert len(checked.pixel_sha256) == 64
+    assert data == stream.getvalue()  # No transcoding, resizing or second AI pass.
+    with pytest.raises(ContextError) as caught:
+        validate_raster(data[:-2], expected_mime=mime)
+    assert caught.value.code == "media_image_invalid"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        PNG[:8],
+        PNG[:-1],
+        PNG[:-1] + b"x",
+        PNG + b"trailing",
+        b"\xff\xd8\xffbad\xff\xd9",
+        b"RIFF\x04\0\0\0WEBP",
+    ],
+)
+def test_valid_magic_is_insufficient_for_complete_raster(bad):
+    with pytest.raises(ContextError) as caught:
+        validate_raster(bad)
+    assert caught.value.code == "media_image_invalid"
+
+
+@pytest.mark.parametrize("corrupt", ["idat_crc", "iend_crc", "pixels"])
+def test_png_parser_never_delivers_invalid_or_oversized_decoded_page(corrupt):
+    candidate = FrameCandidate("f_000000", 0, 0, ("first",), 0)
+    output = []
+    if corrupt == "idat_crc":
+        bad = bytearray(PNG)
+        bad[bad.index(b"IDAT") + 4] ^= 1
+        data = bytes(bad)
+    elif corrupt == "iend_crc":
+        data = PNG[:-1] + bytes([PNG[-1] ^ 1])
+    else:
+        from PIL import Image
+
+        out = io.BytesIO()
+        Image.new("RGB", (11, 10)).save(out, format="PNG")
+        data = out.getvalue()
+    parser = PngFrames([candidate], 1000, output.append, max_pixels=100)
+    with pytest.raises(ContextError) as caught:
+        parser.feed(data)
+    assert caught.value.code == ("media_pixel_limit" if corrupt == "pixels" else "media_image_invalid")
+    assert output == [] and parser.frame_count == 0
+
+
+def test_raster_limits_mime_animation_and_missing_dependency_are_explicit(monkeypatch):
+    from PIL import Image
+
+    with pytest.raises(ContextError) as caught:
+        validate_raster(PNG, expected_mime="image/jpeg")
+    assert caught.value.code == "unsupported_media"
+    with pytest.raises(ContextError) as caught:
+        validate_raster(PNG, max_bytes=len(PNG) - 1)
+    assert caught.value.code == "media_input_limit"
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4), "red").save(
+        out, format="PNG", save_all=True, append_images=[Image.new("RGB", (4, 4), "blue")], duration=100
+    )
+    with pytest.raises(ContextError) as caught:
+        validate_raster(out.getvalue())
+    assert caught.value.code == "unsupported_media"
+    original = builtins.__import__
+
+    def without_pillow(name, *args, **kwargs):
+        if name == "PIL":
+            raise ImportError("synthetic absence")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_pillow)
+    with pytest.raises(ContextError) as caught:
+        validate_raster(PNG)
+    assert caught.value.code == "media_dependency_missing"

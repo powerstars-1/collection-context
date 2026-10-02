@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import builtins
 import hashlib
 from contextlib import closing
 
@@ -14,7 +15,7 @@ from collection_context.processing.inputs import PreparedInputs
 
 # Synthetic raster protocol fixture, not actual OCR or visual-model evidence.
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1kAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ0bD5DwACRAF4aig0hQAAAABJRU5ErkJggg=="
 )
 
 
@@ -91,12 +92,10 @@ def test_raster_only_and_path_traversal(media):
         kind="link",
         scope_id="s_link",
     )["item"]
-    other_input = PreparedInputs(store).prepare_images(
-        other["id"], [(b'<svg onload="alert(1)"/>', "image/png")]
-    )
     with pytest.raises(ContextError) as err:
-        reader.image(other["id"], other_input, "f_000000")
+        PreparedInputs(store).prepare_images(other["id"], [(b'<svg onload="alert(1)"/>', "image/png")])
     assert err.value.code == "unsupported_media"
+    assert store.get(other["id"]).get("prepared_input") is None
 
 
 def test_frame_read_does_not_load_retained_video(media, monkeypatch):
@@ -162,3 +161,37 @@ def test_http_frames_require_auth_and_recheck_exclusion(media):
         assert client.get(image + "?path=/etc/passwd", headers=headers).status_code == 400
         store.exclude(ref, True)
         assert client.get(image, headers=headers).status_code == 404
+
+
+@pytest.mark.parametrize("invalid", [PNG[:-1], PNG[:-1] + b"x", b"<svg/>"])
+def test_existing_broken_raster_is_not_returned_as_browser_image(media, monkeypatch, invalid):
+    store, ref, _ = media
+    # A historical registry can have valid hashes for invalid image bytes.
+    with monkeypatch.context() as historical:
+        historical.setattr("collection_context.processing.inputs.validate_raster", lambda *a, **k: None)
+        identity = PreparedInputs(store).prepare_images(ref, [(invalid, "image/png")])
+    before = store.snapshot()
+    with pytest.raises(ContextError) as caught:
+        MediaEvidence(store).image(ref, identity, "f_000000")
+    assert caught.value.code == ("unsupported_media" if invalid.startswith(b"<") else "media_image_invalid")
+    assert store.snapshot() == before
+
+
+def test_text_reads_and_evidence_listing_do_not_import_image_or_ocr_dependencies(media, monkeypatch):
+    from collection_context.application.service import ContextService
+
+    store, ref, identity = media
+    original = builtins.__import__
+
+    def no_image_dependencies(name, *args, **kwargs):
+        if name.split(".")[0] in {"PIL", "rapidocr", "onnxruntime"}:
+            raise ImportError("synthetic missing image dependencies")
+        return original(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_image_dependencies)
+    reader = MediaEvidence(store)
+    assert reader.listing(ref)["input_id"] == identity
+    assert ContextService(store).read(ref, artifact="original")["material_ref"] == ref
+    with pytest.raises(ContextError) as caught:
+        reader.image(ref, identity, "f_000000")
+    assert caught.value.code == "media_dependency_missing"

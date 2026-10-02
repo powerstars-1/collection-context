@@ -179,3 +179,59 @@ test("JSX uses true option values and controller has no HTML injection or browse
   assert.equal(new Set(ids).size, ids.length);
   for (const match of source.matchAll(/\$\("([^"]+)"\)/g)) assert.ok(ids.includes(match[1]), "missing static control: " + match[1]);
 });
+
+test("budgets have no implicit two-call authority and show actual media counts", async () => {
+  const calls = [];
+  const data = { ...management, prepared: [{ input_id: "u_original", title: "三段音频两帧", audio_segments: 3, visual_frames: 2, planned_calls_before_reuse: 6 }] };
+  const { controller, nodes } = fixture(async (path, value) => { calls.push({ path, value }); return path === "/v1/management/overview" ? data : routes[path]; });
+  await controller.show("activity");
+  assert.equal(nodes["auto-calls"].value, "");
+  assert.equal(nodes["history-calls"].value, "");
+  const checkbox = nodes["prepared-items"].all().find(n => n.tag === "input");
+  checkbox.checked = true; checkbox.dispatchEvent(new Event("change"));
+  assert.match(nodes["history-budget"].textContent, /计划 6 次.*尚未填写/);
+  const submit = () => { const event = new Event("submit", { cancelable: true }); event.submitter = new Node("button"); nodes["history-form"].dispatchEvent(event); };
+  calls.length = 0; submit(); await tick();
+  assert.equal(calls.length, 0);
+  assert.match(nodes["management-feedback"].textContent, /明确填写/);
+  nodes["history-calls"].value = "2";
+  nodes["history-fee"].checked = true;
+  globalThis.confirm = () => false;
+  submit(); await tick();
+  assert.equal(calls.length, 0); // Low explicit cap still needs the extra partial-completion acknowledgement.
+  controller.destroy();
+});
+
+test("task recovery requires preview, per-call review, fee/risk and an explicit budget", async () => {
+  const calls = [];
+  const job = { job_id: "j_old", state: "blocked", kind: "process", max_calls: 2, recorded_calls: 1, unknown_calls: 1, usage_missing_calls: 0, stages: { vision: "blocked" }, can_retry: true };
+  const preview = { job_id: job.job_id, fixed_models: { vision: "original-model" }, stages: [{ name: "vision", state: "blocked", selectable: true, paid: true }], affected_stages: ["vision", "summary"], max_calls: 2, preview_token: "p".repeat(64), unknown_calls: [{ call_id: "c_original", stage: "vision", upstream_request_id: null }] };
+  const { controller, nodes } = fixture(async (path, value) => {
+    calls.push({ path, value });
+    if (path === "/v1/management/overview") return { ...management, jobs: [job] };
+    if (path === "/v1/management/retry-preview") return preview;
+    if (path === "/v1/management/retry") return { job_id: "j_new", state: "queued" };
+    return routes[path];
+  });
+  await controller.show("activity");
+  const findButton = text => nodes["task-list"].all().find(n => n.tag === "button" && n.textContent === text);
+  findButton("核对并选择重试阶段").dispatchEvent(new Event("click")); await tick();
+  const stage = nodes["task-list"].all().find(n => n.tag === "input");
+  stage.checked = true;
+  findButton("预览所选阶段").dispatchEvent(new Event("click")); await tick();
+  const submit = findButton("创建新尝试");
+  submit.dispatchEvent(new Event("click")); await tick();
+  assert.equal(calls.filter(c => c.path === "/v1/management/retry").length, 0);
+  const inputs = nodes["task-list"].all().filter(n => n.tag === "input");
+  inputs.filter(n => n.type === "checkbox").forEach(n => { n.checked = true; });
+  const budget = inputs.find(n => n.type === "number"); assert.equal(budget.value, ""); budget.value = "2";
+  submit.dispatchEvent(new Event("click")); await tick();
+  const sent = calls.find(c => c.path === "/v1/management/retry");
+  assert.deepEqual(sent.value.stages, ["vision"]);
+  assert.deepEqual(sent.value.reviewed_call_ids, ["c_original"]);
+  assert.equal(sent.value.duplicate_charge_confirmed, true);
+  assert.equal(sent.value.fee_confirmed, true);
+  assert.equal(sent.value.max_calls, 2);
+  assert.match(nodes["management-feedback"].textContent, /新尝试 j_new 已排队/);
+  controller.destroy();
+});

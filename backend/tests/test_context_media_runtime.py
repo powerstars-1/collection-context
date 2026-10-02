@@ -247,7 +247,8 @@ def test_prepared_video_connects_ocr_records_selection_and_originals(store, tmp_
 @pytest.mark.skipif(
     os.environ.get("RUN_LOCAL_MEDIA_RUNTIME") != "1", reason="Explicit original native media test only"
 )
-def test_real_original_small_video_uses_receipt_without_path(store, tmp_path, monkeypatch):
+@pytest.mark.parametrize("has_audio", [True, False])
+def test_real_original_small_video_uses_receipt_without_path(store, tmp_path, monkeypatch, has_audio):
     inject_ocr(monkeypatch)
     # These copied developer binaries may still link system/Homebrew shared libraries.
     # This verifies receipt execution and decoding, NOT standalone distribution readiness.
@@ -274,16 +275,12 @@ def test_real_original_small_video_uses_receipt_without_path(store, tmp_path, mo
             "lavfi",
             "-i",
             "color=c=blue:s=160x90:r=10",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=880:sample_rate=16000",
+            *(["-f", "lavfi", "-i", "sine=frequency=880:sample_rate=16000"] if has_audio else []),
             "-t",
             "1.2",
             "-c:v",
             "mpeg4",
-            "-c:a",
-            "aac",
+            *(["-c:a", "aac"] if has_audio else []),
             "-threads",
             "1",
             str(video),
@@ -315,6 +312,7 @@ def test_real_original_small_video_uses_receipt_without_path(store, tmp_path, mo
         expected_content_hash=item["content_hash"],
     )
     payload = PreparedInputs(store).load(identity)
-    assert payload["originals"] and payload["frames"] and payload["audio"]
-    assert payload["coverage"]["has_audio"] is True and store.get(item["id"])["prepared_input"] == identity
-    assert "ffprobe" in spawned and spawned.count("ffmpeg") >= 4
+    assert payload["originals"] and payload["frames"] and bool(payload["audio"]) is has_audio
+    assert payload["coverage"]["has_audio"] is has_audio
+    assert store.get(item["id"])["prepared_input"] == identity
+    assert "ffprobe" in spawned and spawned.count("ffmpeg") >= (4 if has_audio else 3)

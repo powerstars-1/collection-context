@@ -85,6 +85,13 @@ def test_remaining_literal_checks_report_missing_without_claiming_accuracy(remai
 def test_remaining_driver_runs_registered_workflows_four_calls_without_secret_storage(
     remaining_helper, tmp_path, monkeypatch, capsys, bad_citation
 ):
+    from PIL import Image
+
+    pages = []
+    for color in ("blue", "green"):
+        data = io.BytesIO()
+        Image.new("RGB", (2, 2), color).save(data, format="PNG")
+        pages.append(data.getvalue())
     previous = tmp_path / "previous"
     previous.mkdir()
     original_ledger(previous)
@@ -100,9 +107,7 @@ def test_remaining_driver_runs_registered_workflows_four_calls_without_secret_st
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        remaining_helper, "make_pages", lambda _: [b"first-original-png", b"second-original-png"]
-    )
+    monkeypatch.setattr(remaining_helper, "make_pages", lambda _: pages)
     monkeypatch.setattr(
         remaining_helper.subprocess,
         "run",

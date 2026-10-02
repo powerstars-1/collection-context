@@ -20,9 +20,9 @@ const classNames = {
   "source-row": "space-y-3 rounded-xl border border-zinc-200 p-4",
   "source-controls": "flex flex-wrap items-center gap-3",
   "model-card": "space-y-4 rounded-xl border border-zinc-200 bg-white p-4",
-  "task-row": "space-y-3 rounded-xl border border-zinc-200 p-4",
+  "task-row": "min-w-0 space-y-3 rounded-xl border border-zinc-200 p-4 [overflow-wrap:anywhere]",
   "tag": "inline-flex rounded-md bg-zinc-100 px-2 py-1 text-xs text-zinc-600",
-  "check": "flex items-start gap-2 text-sm text-zinc-600",
+  "check": "flex min-w-0 items-start gap-2 text-sm text-zinc-600 [overflow-wrap:anywhere]",
   "field-grid": "grid gap-4 sm:grid-cols-2",
   "hero-metrics": "grid gap-4 sm:grid-cols-3",
   "metric-tile": "rounded-xl border border-zinc-200 bg-white p-4",
@@ -46,6 +46,7 @@ export function mountManagement({ root = document.querySelector("[data-managemen
   let connectionPoll = null, connectionRunId = null, connectionRunEpoch = 0;
   let sourceEpoch = 0, sourceOffset = 0, modelEpoch = 0, managementEpoch = 0;
   let taskOffset = 0, preparedOffset = 0, historyKey = null, historyFingerprint = null;
+  const preparedCounts = new Map();
   function schedule(fn, delay) {
     const timer = setTimeout(() => { timers.delete(timer); if (!destroyed) fn(); }, delay);
     timers.add(timer); return timer;
@@ -96,7 +97,7 @@ export function mountManagement({ root = document.querySelector("[data-managemen
       onOverview?.(data);
     } catch (error) { if (!destroyed && epoch === requestEpoch) $("overview").replaceChildren(el("p", error.message, "error")); }
   }
-const taskLabels = { queued: "已排队", running: "运行中", succeeded: "完成", partial: "部分完成", failed: "失败", cancelled: "已取消", blocked: "需人工处理" };
+const taskLabels = { queued: "已排队", running: "运行中", succeeded: "完成", ready: "已完成", not_applicable: "不适用", not_started: "尚未开始", interrupted: "中断待恢复", partial: "部分完成", failed: "失败", cancelled: "已取消", blocked: "需人工处理" };
 const sourceStates = { not_started: "尚未执行", running: "正在同步", ready: "本批已保存", partial: "部分保存", cancelled: "已取消", paused: "检查点已暂停", blocked: "需人工处理" };
 async function loadModels() {
   const epoch = ++modelEpoch;
@@ -515,7 +516,9 @@ async function loadManagement() {
     $("prepared-more").hidden = data.next_prepared_offset === null;
     $("prepared-more").dataset.offset = data.next_prepared_offset;
     $("prepared-items").replaceChildren();
+    preparedCounts.clear();
     data.prepared.forEach((item) => {
+      preparedCounts.set(item.input_id, item.planned_calls_before_reuse ?? null);
       const label = el("label", undefined, "check");
       const input = el("input");
       input.type = "checkbox";
@@ -523,12 +526,15 @@ async function loadManagement() {
       input.value = item.input_id;
       listen(input, "change", updateHistoryBudget);
       label.append(input, el("span", item.title || "无标题资料"));
+      label.append(el("span", item.planned_calls_before_reuse == null
+        ? "计划次数未确认，请先检查媒体准备状态。"
+        : `音频 ${item.audio_segments} 段 + 画面 ${item.visual_frames} 页 + 总结 1 次；无复用时共 ${item.planned_calls_before_reuse} 次。`, "muted"));
       $("prepared-items").append(label);
     });
     if (!data.prepared.length) $("prepared-items").append(el("p", "当前页没有已准备媒体的资料。", "muted"));
     const auto = tasks.automatic;
     $("auto-enabled").value = auto.enabled ? "yes" : "no";
-    $("auto-calls").value = auto.max_calls_per_task ?? 2;
+    $("auto-calls").value = auto.max_calls_per_task ?? "";
     $("auto-tasks").value = auto.max_new_tasks || 5;
     $("auto-fee").checked = false;
     $("history-fee").checked = false;
@@ -545,6 +551,7 @@ function renderTask(task) {
   const row = el("article", undefined, "task-row");
   row.append(el("span", taskLabels[task.state] || task.state, "tag"), el("p", `${task.kind === "sync" ? "来源同步" : task.kind === "process" ? "媒体提取" : "链接入库"} · ${task.job_id}`));
   row.append(el("p", `已登记请求 ${task.recorded_calls} / 上限 ${task.max_calls}；结果不明 ${task.unknown_calls}，已完成但无用量 ${task.usage_missing_calls}。金额未提供。`, "muted"));
+  if (task.parent_job_id) row.append(el("p", `第 ${task.attempt} 次尝试 · 原任务 ${task.parent_job_id}；旧请求及费用记录保留。`, "muted"));
   if (Object.keys(task.stages).length) row.append(el("p", Object.entries(task.stages).map(([k, v]) => `${k}：${taskLabels[v] || v}`).join(" / ")));
   if (task.error_code) row.append(el("p", `需处理：${task.error_code}`, "error"));
   if (task.link_result) {
@@ -581,13 +588,96 @@ function renderTask(task) {
     });
     row.append(button);
   }
+  if (task.can_retry) {
+    const button = el("button", "核对并选择重试阶段", "secondary");
+    button.type = "button";
+    const panel = el("div", undefined, "stack-form");
+    listen(button, "click", async () => {
+      button.disabled = true;
+      panel.replaceChildren(el("p", "正在读取固定计划；不会请求模型…", "muted"));
+      try {
+        const initial = await api("/v1/management/retry-preview", { job_id: task.job_id });
+        panel.replaceChildren(el("p", "选择要补做的阶段。成功阶段会复用；所选阶段影响的总结和保存步骤也会重新检查。未选缺口保持原状。", "notice"));
+        panel.append(el("p", `沿用原任务模型：${Object.entries(initial.fixed_models).map(([role, name]) => `${role}: ${name}`).join(" / ")}`, "muted"));
+        const selected = [];
+        const details = el("div", undefined, "stack-form");
+        for (const stage of initial.stages) {
+          const label = el("label", undefined, "check");
+          const input = el("input"); input.type = "checkbox";
+          input.className = "mt-1 h-4 w-4 shrink-0 accent-zinc-900";
+          input.disabled = !stage.selectable;
+          selected.push({ input, name: stage.name });
+          listen(input, "change", () => details.replaceChildren());
+          label.append(input, el("span", `${stage.name} · ${taskLabels[stage.state] || stage.state}${stage.selectable ? "" : "（已完成，将复用）"}`));
+          panel.append(label);
+        }
+        const previewButton = el("button", "预览所选阶段", "secondary"); previewButton.type = "button";
+        listen(previewButton, "click", async () => {
+          const stages = selected.filter(value => value.input.checked && !value.input.disabled).map(value => value.name);
+          if (!stages.length) { details.replaceChildren(el("p", "请先选择至少一个未完成阶段。", "error")); return; }
+          previewButton.disabled = true;
+          details.replaceChildren(el("p", "正在核对阶段与未知请求…", "muted"));
+          try {
+            const preview = await api("/v1/management/retry-preview", { job_id: task.job_id, stages });
+            if (JSON.stringify(stages) !== JSON.stringify(selected.filter(value => value.input.checked && !value.input.disabled).map(value => value.name))) {
+              details.replaceChildren(el("p", "选择已变化，请重新预览。", "muted")); return;
+            }
+            details.replaceChildren(el("p", `本次范围：${preview.affected_stages.join("、")}。无复用时最多 ${preview.max_calls} 次云请求；金额未知。`, "notice"));
+            const callChecks = [];
+            if (preview.unknown_calls.length) details.append(el("p", "以下请求结果未明。请到上游控制台核对：未查到记录、超时或等待很久都不代表未收费。此操作保留原来的未知账本，仅允许这一次新尝试重试，可能重复计费。", "error"));
+            for (const call of preview.unknown_calls) {
+              const check = el("input"); check.type = "checkbox";
+              check.className = "mt-1 h-4 w-4 shrink-0 accent-zinc-900";
+              const label = el("label", undefined, "check");
+              label.append(check, el("span", `我已核对 ${call.stage} · ${call.call_id}；登记时间 ${call.created_at || "未提供"}；上游请求号：${call.upstream_request_id || "未提供，请按时间和固定模型核对"}。`));
+              callChecks.push({ input: check, id: call.call_id }); details.append(label);
+            }
+            const duplicate = el("input"); duplicate.type = "checkbox";
+            duplicate.className = "mt-1 h-4 w-4 shrink-0 accent-zinc-900";
+            if (preview.unknown_calls.length) {
+              const label = el("label", undefined, "check");
+              label.append(duplicate, el("span", "已核对仍需重试，我接受本次可能重复计费。")); details.append(label);
+            }
+            const budget = el("input"); budget.type = "number"; budget.min = String(preview.max_calls); budget.max = "1000"; budget.required = true;
+            budget.value = ""; budget.placeholder = `请明确填写上限（至少 ${preview.max_calls}）`;
+            const budgetLabel = el("label", "本次最多云请求次数", "field"); fieldComponent(budgetLabel, budget); details.append(budgetLabel);
+            const fee = el("input"); fee.type = "checkbox"; fee.className = "mt-1 h-4 w-4 shrink-0 accent-zinc-900";
+            const feeLabel = el("label", undefined, "check"); feeLabel.append(fee, el("span", "确认本次范围、媒体上传和请求上限；不会自动补额或无限重试。")); details.append(feeLabel);
+            const submit = el("button", "创建新尝试"); submit.type = "button";
+            const feedback = el("p", "", "error");
+            const idempotencyKey = crypto.randomUUID();
+            listen(submit, "click", async () => {
+              const maxCalls = Number(budget.value);
+              if (!budget.value.trim() || !Number.isInteger(maxCalls) || maxCalls < preview.max_calls || maxCalls > 1000 || !fee.checked || callChecks.some(value => !value.input.checked) || (callChecks.length && !duplicate.checked)) {
+                feedback.textContent = "请填写足够的明确上限，并完成范围、费用及所有未知请求的核对确认。"; return;
+              }
+              submit.disabled = true;
+              try {
+                const next = await api("/v1/management/retry", { job_id: task.job_id, stages, preview_token: preview.preview_token, idempotency_key: idempotencyKey, max_calls: maxCalls, fee_confirmed: true, reviewed_call_ids: callChecks.map(value => value.id), duplicate_charge_confirmed: duplicate.checked });
+                $("management-feedback").textContent = `新尝试 ${next.job_id} 已排队；原任务与费用保留，等待已授权后台处理。`;
+                await loadManagement();
+              } catch (error) { feedback.textContent = error.message; }
+              finally { submit.disabled = destroyed || !canManage; }
+            });
+            details.append(submit, feedback);
+          } catch (error) { details.replaceChildren(el("p", error.message, "error")); }
+          finally { previewButton.disabled = destroyed || !canManage; }
+        });
+        panel.append(previewButton, details);
+      } catch (error) { panel.replaceChildren(el("p", error.message, "error")); }
+      finally { button.disabled = destroyed || !canManage; }
+    });
+    row.append(button, panel);
+  }
   $("task-list").append(row);
 }
 function historySelection() {
   return [...$("prepared-items").querySelectorAll("input:checked")].map((input) => input.value);
 }
 function updateHistoryBudget() {
-  $("history-budget").textContent = `选中 ${historySelection().length} 条，本批请求上限 ${historySelection().length * Number($("history-calls").value)}；金额未知。`;
+  const selected = historySelection(), counts = selected.map(id => preparedCounts.get(id));
+  const planned = counts.every(value => Number.isInteger(value)) ? counts.reduce((sum, value) => sum + value, 0) : null;
+  $("history-budget").textContent = `选中 ${selected.length} 条；无复用时计划 ${planned ?? "未知"} 次请求；本批授权上限 ${$("history-calls").value.trim() ? selected.length * Number($("history-calls").value) : "尚未填写"}。成功阶段可能复用；不足时停在缺口，不自动补额，金额未知。`;
 }
 async function managementAction(button, action, value, message) {
   const epoch = requestEpoch;
@@ -604,6 +694,7 @@ async function managementAction(button, action, value, message) {
 }
 listen($("auto-form"), "submit", async (event) => {
   event.preventDefault();
+  if ($("auto-enabled").value === "yes" && !$("auto-calls").value.trim()) throw new Error("请明确填写每条请求上限：有音轨的视频至少需要音频段数 + 画面数 + 总结 1 次；后续新资料长度不同，额度不足会停止，不会自动补额。");
   await managementAction(event.submitter, "automatic", {
     enabled: $("auto-enabled").value === "yes", max_calls: Number($("auto-calls").value),
     max_new_tasks: Number($("auto-tasks").value), fee_confirmed: $("auto-fee").checked,
@@ -614,7 +705,11 @@ listen($("history-form"), "submit", async (event) => {
   event.preventDefault();
   const input_ids = historySelection();
   if (!input_ids.length) { $("management-feedback").textContent = "请先选择资料。"; return; }
+  if (!$("history-calls").value.trim()) throw new Error("请根据所选资料的阶段数量，明确填写每条请求上限。");
   const max_calls = Number($("history-calls").value);
+  if (!Number.isInteger(max_calls) || max_calls < 0 || max_calls > 1000) throw new Error("请求上限须为 0 至 1000 的整数。");
+  if (input_ids.some(id => !Number.isInteger(preparedCounts.get(id)))) throw new Error("所选资料尚无法确认计划次数，请先检查媒体准备状态。");
+  if (input_ids.some(id => preparedCounts.get(id) > max_calls) && !confirm("此上限低于所选资料无复用时需要的阶段数。若不能复用，任务会中途停止；不会自动追加费用。仍以此较低上限提交吗？")) return;
   const fingerprint = JSON.stringify({ input_ids, max_calls });
   if (fingerprint !== historyFingerprint) { historyKey = crypto.randomUUID(); historyFingerprint = fingerprint; }
   await managementAction(event.submitter, "history", {

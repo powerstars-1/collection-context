@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import io
 from dataclasses import asdict, replace
 from typing import Any
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.media import MediaPolicy, PreparedFrame
+from collection_context.infrastructure.media import MediaPolicy, PreparedFrame, validate_raster
 from collection_context.infrastructure.ocr import CpuOcr, OcrResult
 
-OCR_SELECTION_VERSION = "ocr_pixel_selection_v1"
+OCR_SELECTION_VERSION = "ocr_pixel_selection_v2"
 
 
 class OcrFrameSelection:
@@ -20,9 +19,8 @@ class OcrFrameSelection:
         self.frames: list[PreparedFrame] = []
         self.records: list[dict[str, Any]] = []
         self.retained_bytes = 0
-        self.previous_pixels: str | None = None
-        self.previous_result: OcrResult | None = None
-        self.previous_selected: str | None = None
+        # Bounded by max_ocr_frames; cache only validated results, not failed OCR.
+        self.exact_pixels: dict[str, tuple[OcrResult, str]] = {}
         self.calls = 0
 
     def feed(self, frame: PreparedFrame) -> None:
@@ -31,22 +29,25 @@ class OcrFrameSelection:
         if hashlib.sha256(frame.data).hexdigest() != frame.sha256:
             raise ContextError("media_changed", "OCR画面输入哈希已改变。")
         try:
-            from PIL import Image
-
-            with Image.open(io.BytesIO(frame.data)) as image:
-                if image.width * image.height > self.policy.max_pixels or not image.width or not image.height:
-                    raise ValueError
-                pixels = hashlib.sha256(
-                    str(image.size).encode() + image.convert("RGBA").tobytes()
-                ).hexdigest()
-        except Exception:
+            pixels = validate_raster(
+                frame.data,
+                expected_mime=frame.mime_type,
+                max_bytes=self.policy.max_frame_bytes,
+                max_pixels=self.policy.max_pixels,
+                pixel_hash=True,
+            ).pixel_sha256
+            assert pixels is not None
+        except ContextError as error:
+            if error.code == "media_dependency_missing":
+                raise
             raise ContextError("ocr_image_invalid", "本地OCR候选图片无法安全解码，未当作空文字。") from None
-        reused = pixels == self.previous_pixels and self.previous_result is not None
+        cached = self.exact_pixels.get(pixels)
+        reused = cached is not None
         error_code = None
         try:
             if reused:
-                result = self.previous_result
-                assert result is not None
+                assert cached is not None
+                result = cached[0]
             else:
                 self.calls += 1
                 result = self.engine.recognize(frame.data)
@@ -87,7 +88,8 @@ class OcrFrameSelection:
             )
             self.frames.append(frame)
             self.retained_bytes += len(frame.data)
-            self.previous_selected = frame.candidate.evidence_id
+            if result is not None:
+                self.exact_pixels[pixels] = (result, frame.candidate.evidence_id)
         self.records.append(
             {
                 "evidence_id": frame.candidate.evidence_id,
@@ -95,7 +97,7 @@ class OcrFrameSelection:
                 "image_sha256": frame.sha256,
                 "pixel_sha256": pixels,
                 "selected": not duplicate,
-                "duplicate_of": self.previous_selected if duplicate else None,
+                "duplicate_of": cached[1] if duplicate and cached else None,
                 "reason": reason,
                 "state": "failed" if error_code else result.state if result else "failed",
                 "error_code": error_code,
@@ -103,7 +105,6 @@ class OcrFrameSelection:
                 "lines": [asdict(line) for line in result.lines] if result else [],
             }
         )
-        self.previous_pixels, self.previous_result = pixels, result
 
     def coverage(self) -> dict[str, Any]:
         failures = [p["evidence_id"] for p in self.records if p["state"] == "failed"]
@@ -118,6 +119,17 @@ class OcrFrameSelection:
             "ocr_duplicate_frames": len(self.records) - len(self.frames),
             "selected_frames": len(self.frames),
             "ocr_records": self.records,
+            # Summary consumers omit verbose OCR text/boxes, but must still know
+            # where a previously retained identical page reappeared.
+            "duplicate_occurrences": [
+                {
+                    "evidence_id": record["evidence_id"],
+                    "nominal_seconds": record["nominal_seconds"],
+                    "duplicate_of": record["duplicate_of"],
+                }
+                for record in self.records
+                if record["duplicate_of"] is not None
+            ],
             "complete": False,
             "near_duplicate_filter": "not_enabled_without_quality_validation",
         }

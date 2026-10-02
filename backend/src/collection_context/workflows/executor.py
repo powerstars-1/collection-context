@@ -121,15 +121,32 @@ class DurableExecutor:
         if job["state"] != "running" or job["cancel_requested"]:
             raise ContextError("job_not_running", "任务已停止，未派发后续阶段。")
 
-    def _unknown(self, signature: str, principal: str) -> None:
+    def _unknown(self, signature: str, principal: str, ref: str) -> None:
         # A newly submitted job must not silently duplicate a prior unconfirmed request.
-        for job in self.store.snapshot()["jobs"].values():
+        state = self.store.snapshot()
+        current = self.jobs._job(state, ref, principal)
+        recovery = current.get("recovery", {})
+        authorized = recovery.get("unknown_authorizations", [])
+        for job in state["jobs"].values():
             if job["principal"] != principal:
                 continue
-            if any(
-                call["signature"] == signature and call["state"] in {"intent", "unknown"}
-                for call in job["calls"]
-            ):
+            for call in job["calls"]:
+                if call["signature"] != signature or call["state"] not in {"intent", "unknown"}:
+                    continue
+                if (
+                    principal == "local_owner"
+                    and recovery.get("schema_version") == 1
+                    and recovery.get("duplicate_charge_confirmed") is True
+                    and call["stage"] in recovery.get("affected_stages", [])
+                    and any(
+                        value.get("job_id") == job["id"]
+                        and value.get("call_id") == call["id"]
+                        and value.get("signature") == signature
+                        and value.get("call_version") == digest(call)
+                        for value in authorized
+                    )
+                ):
+                    continue
                 raise ContextError(
                     "upstream_outcome_unknown",
                     "同一阶段有结果未明的请求；未自动重发。",
@@ -157,9 +174,8 @@ class DurableExecutor:
                 principal=principal,
             )
             return {"status": "failed", "error": error.as_dict()}
-        if stage.paid:
-            self._unknown(signature, principal)
         previous = self.jobs.get(ref, principal=principal)["stages"].get(stage.name)
+        recovery = self.jobs.get(ref, principal=principal).get("recovery")
         if (
             previous
             and previous["input_hash"] == actual_input
@@ -180,6 +196,23 @@ class DurableExecutor:
                     principal=principal,
                 )
                 return result
+        if recovery is not None and stage.name not in recovery["affected_stages"]:
+            # Non-selected gaps stay gaps. A targeted retry cannot silently dispatch
+            # another failed/unstarted stage merely because its plan is reconstructable.
+            error = ContextError("stage_not_selected", "此缺口不在本次重试范围内，未请求模型。")
+            if previous and previous["state"] == "failed":
+                return {"status": "failed", "error": previous["error"]}
+            self.jobs.set_stage(
+                ref,
+                stage.name,
+                state_name="failed",
+                input_hash=actual_input,
+                error=error,
+                principal=principal,
+            )
+            return {"status": "failed", "error": error.as_dict()}
+        if stage.paid:
+            self._unknown(signature, principal, ref)
         if previous and previous["state"] == "failed":
             return {"status": "failed", "error": previous["error"]}
         if stage.validate is not None:

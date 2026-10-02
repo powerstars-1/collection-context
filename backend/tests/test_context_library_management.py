@@ -245,11 +245,13 @@ def test_typed_arguments_and_excluded_pagination(store):
 
 
 def test_media_export_preserves_order_and_counts_unique_blobs_without_paths(store):
+    from test_context_media import PNG
+
     item = store.upsert(
         {"native_id": "678", "title": "合成图文", "media_type": "image"}, kind="saved", scope_id="s_saved"
     )["item"]
-    # Input registry validates identities and descriptors, no external media or model request.
-    data = b"synthetic-png-fixture"
+    # Original valid raster passes full batch preflight without any model request.
+    data = PNG
     identity = PreparedInputs(store).prepare_images(item["id"], [(data, "image/png")] * 2)
     service = manager(store)
     omitted = service.export_preview(item["id"], media_scope="none")

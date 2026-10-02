@@ -209,7 +209,7 @@ def test_bound_reference_to_original_pages_uses_canonical_frame_identity(library
         scope_id="s_link",
     )["item"]
     png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jZ1kAAAAASUVORK5CYII="
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQ0bD5DwACRAF4aig0hQAAAABJRU5ErkJggg=="
     )
     identity = PreparedInputs(store).prepare_images(item["id"], [(png, "image/png")])
     bind(store, old_ref(), item["id"])

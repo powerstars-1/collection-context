@@ -51,6 +51,29 @@ def execution_allowed(state: dict[str, Any], job: dict[str, Any]) -> bool:
     if not isinstance(dispatch, dict):
         raise ContextError("invalid_dispatch_policy", "任务调度权限结构无效。")
     mode = dispatch.get("mode")
+    if mode == "model_retry":
+        if set(dispatch) != {"mode", "authorization_id"}:
+            raise ContextError("invalid_dispatch_policy", "恢复任务没有固定的主人授权。")
+        identity = valid_id(dispatch["authorization_id"])
+        admission = state.get("model_retries", {}).get(identity)
+        recovery = job.get("recovery")
+        if (
+            not isinstance(admission, dict)
+            or not isinstance(recovery, dict)
+            or recovery.get("schema_version") != 1
+            or job["kind"] != "process"
+            or job["principal"] != "local_owner"
+            or "extraction" not in job["payload"]
+            or admission.get("job_id") != job["id"]
+            or admission.get("payload_hash") != digest(job["payload"])
+            or admission.get("recovery_hash") != digest(recovery)
+            or admission.get("max_calls") != job["budget"]["max_calls"]
+        ):
+            raise ContextError("invalid_dispatch_policy", "新尝试与已核对的阶段、未知请求或额度不一致。")
+        parent = state["jobs"].get(recovery.get("parent_job_id"))
+        if not parent or parent["principal"] != "local_owner" or parent["kind"] != "process":
+            raise ContextError("invalid_dispatch_policy", "新尝试缺少同一主人的原任务记录。")
+        return True
     if mode == "scheduled_sync":
         if set(dispatch) != {"mode", "schedule_id"}:
             raise ContextError("invalid_dispatch_policy", "来源定时任务没有固定授权。")

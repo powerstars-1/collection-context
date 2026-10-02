@@ -162,3 +162,109 @@ def test_missing_audio_cannot_be_mislabeled_as_no_audio(store):
         )
     assert caught.value.code == "audio_presence_unknown"
     assert store.snapshot().get("prepared_inputs", {}) == {}
+
+
+@pytest.mark.parametrize("bad", [PNG[:-1], PNG[:-1] + b"x", b"\xff\xd8\xffbad", b"not an image"])
+def test_bad_later_original_refuses_entire_batch_before_any_blob_write(store, monkeypatch, bad):
+    material = item(store)
+    before = store.snapshot()
+    monkeypatch.setattr(store.files, "write", lambda *a, **k: pytest.fail("No partial image batch write"))
+    with pytest.raises(ContextError) as caught:
+        PreparedInputs(store).prepare_images(material["id"], [(PNG, "image/png"), (bad, "image/png")])
+    assert caught.value.code in {"media_image_invalid", "unsupported_media"}
+    assert store.snapshot() == before
+
+
+def test_old_broken_image_registry_cannot_create_paid_stages(store, monkeypatch):
+    from test_context_model_registry import configure, requests
+
+    from collection_context.workflows.extraction import ExtractionWorkflow
+
+    material = item(store)
+    registry = PreparedInputs(store)
+    # Simulate an immutable pre-validation registry, not a current production bypass.
+    with monkeypatch.context() as historical:
+        historical.setattr("collection_context.processing.inputs.validate_raster", lambda *a, **k: None)
+        identity = registry.prepare_images(material["id"], [(PNG[:-1], "image/png")])
+    configure(store, "k_" + "0" * 32, "vision", "original-vision")
+    configure(store, "k_" + "0" * 32, "summary", "original-summary")
+    sent = requests(monkeypatch)
+    with pytest.raises(ContextError) as caught:
+        ExtractionWorkflow(store, lambda _: "synthetic-not-a-real-key").submit(
+            identity, idempotency_key="old-invalid-media", max_calls=2
+        )
+    assert caught.value.code == "media_image_invalid"
+    assert sent == [] and store.snapshot()["jobs"] == {}
+
+
+def test_exact_reappearance_reduces_real_workflow_transport_without_losing_brief_code_page(
+    store, monkeypatch
+):
+    import io
+
+    from PIL import Image, ImageDraw
+    from test_context_model_registry import configure, requests
+    from test_context_ocr_selection import page, select
+
+    from collection_context.workflows.extraction import ExtractionWorkflow
+
+    def code_page(text):
+        out = io.BytesIO()
+        canvas = Image.new("RGB", (400, 80), "white")
+        ImageDraw.Draw(canvas).text((10, 10), text, fill="black")
+        canvas.save(out, format="PNG")
+        return out.getvalue()
+
+    first = code_page("Original prompt: width=390")
+    brief = code_page("Original prompt: width=390; mode=strict")
+    new_character = code_page("Original prompt: width=391; mode=strict")
+    selector = select()
+    # These selected samples model 0.1-second pages after 20 seconds. This test
+    # proves dedup/transport preservation, not real-video temporal recall.
+    for candidate in (
+        page(0, data=first, seconds=0, reasons=("first",)),
+        page(201, data=brief, seconds=20.1),
+        page(202, data=first, seconds=20.2),
+        page(203, data=new_character, seconds=20.3),
+        page(210, data=first, seconds=21, reasons=("last",)),
+    ):
+        selector.feed(candidate)
+    material = item(store, "video")
+    registry = PreparedInputs(store)
+    identity = registry.save(
+        material["id"],
+        content_hash=material["content_hash"],
+        originals=[(b"original protocol fixture, not decoded video", "video/mp4")],
+        audio=[],
+        frames=selector.frames,
+        coverage={**selector.coverage(), "has_audio": False},
+        processor_version="original-offline-test",
+        strategy_hash="original-offline-test",
+        kind="video",
+    )
+    configure(store, "k_" + "0" * 32, "vision", "original-vision")
+    configure(store, "k_" + "0" * 32, "summary", "original-summary")
+    sent = requests(monkeypatch)
+    workflow = ExtractionWorkflow(store, lambda _: "synthetic-not-a-real-key")
+    job = workflow.submit(identity, idempotency_key="reappearing-pages", max_calls=5)
+    done = workflow.run(job["id"])
+    assert done["state"] == "succeeded"
+    assert [call["model"] for call in sent] == ["original-vision"] * 4 + ["original-summary"]
+    assert "duplicate_occurrences" in str(sent[-1]) and "20.2" in str(sent[-1])
+    payload = registry.load(identity)
+    assert [entry["candidate"]["evidence_id"] for entry in payload["frames"]] == [
+        "f_000000",
+        "f_000201",
+        "f_000203",
+        "f_000210",
+    ]
+    assert len(selector.engine.calls) == 3
+    assert payload["coverage"]["ocr_records"][2]["duplicate_of"] == "f_000000"
+    assert payload["coverage"]["ocr_records"][2]["nominal_seconds"] == 20.2
+    assert [entry["nominal_seconds"] for entry in payload["coverage"]["ocr_records"]] == [
+        0,
+        20.1,
+        20.2,
+        20.3,
+        21,
+    ]
