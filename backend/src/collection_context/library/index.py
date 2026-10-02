@@ -168,8 +168,37 @@ class FileIndex:
             except ContextError as error:
                 if error.code not in {"not_found", "forbidden_path"}:
                     raise
-                self.store.files.write(entry_path, desired, replace=True)
-                next_generated_entries[entry_path] = desired_hash
+                # An unreadable existing object is not proof of absence. Never
+                # replace links, oversized files or inaccessible user entries.
+                if error.code == "forbidden_path":
+                    gaps.append(
+                        {
+                            "material_ref": ref,
+                            "artifact": "readable_entry",
+                            "code": "readable_entry_unreadable",
+                        }
+                    )
+                    if entry_path in previous_entries:
+                        next_generated_entries[entry_path] = previous_entries[entry_path]
+                else:
+                    try:
+                        self.store.files.write(entry_path, desired)
+                    except ContextError as collision:
+                        if collision.code != "write_conflict":
+                            raise
+                        # A file can appear after absence was sampled. No blind
+                        # retry/replace, and no ownership claim of its contents.
+                        gaps.append(
+                            {
+                                "material_ref": ref,
+                                "artifact": "readable_entry",
+                                "code": "readable_entry_write_conflict",
+                            }
+                        )
+                        if entry_path in previous_entries:
+                            next_generated_entries[entry_path] = previous_entries[entry_path]
+                    else:
+                        next_generated_entries[entry_path] = desired_hash
             else:
                 tracked_hash = previous_entries.get(entry_path)
                 current_hash = hashlib.sha256(current).hexdigest()
@@ -191,7 +220,12 @@ class FileIndex:
                     )
                     next_generated_entries[entry_path] = tracked_hash
                 else:
-                    self.store.files.write(entry_path, desired, replace=True)
+                    # A proven, unchanged generated entry needs no publication.
+                    # Retain its identity/mtime and avoid durable rewrites of all
+                    # other notes when just one material changes. Untracked and
+                    # user-modified files stay in their existing gap branches.
+                    if current_hash != desired_hash:
+                        self.store.files.write(entry_path, desired, replace=True)
                     next_generated_entries[entry_path] = desired_hash
             if item["excluded"]:
                 continue
