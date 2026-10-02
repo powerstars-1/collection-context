@@ -14,6 +14,7 @@ from typing import Any
 
 from collection_context.application.agent_addition import AgentAdditionGateway
 from collection_context.application.contracts import ARTIFACT_KINDS, ContextError, envelope
+from collection_context.application.gateway import ReadGateway
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.browser import BrowserSession
 from collection_context.infrastructure.files import SafeFiles
@@ -21,6 +22,7 @@ from collection_context.infrastructure.secrets import CredentialBackend, FileSec
 from collection_context.infrastructure.system_secrets import SystemSecrets
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.library.index import FileIndex
+from collection_context.library.legacy_layout import LegacyLayoutReader
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 from collection_context.processing.profiles import ModelCatalog
@@ -35,10 +37,17 @@ from collection_context.workflows.source_schedule import SourceSchedule
 from collection_context.workflows.synchronization import SynchronizationWorkflow
 from collection_context.workflows.worker import BackgroundWorker
 
+LEGACY_READ_COMMANDS = frozenset({"search", "read", "status", "list", "overview"})
+
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="收藏上下文：独立文件库与受控读取（开发版）")
-    result.add_argument("--workspace", type=Path, required=True, help="新产品工作目录；不是旧 Obsidian 库")
+    result.add_argument(
+        "--workspace", type=Path, required=True, help="产品工作目录；旧库需显式加 --legacy-vault"
+    )
+    result.add_argument(
+        "--legacy-vault", action="store_true", help="将 workspace 作为旧 Markdown 库只读打开；不初始化或迁移"
+    )
     result.add_argument("--runtime-dir", type=Path, help="显式库外运行依赖目录；无效时不回退系统工具")
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("runtime-options", help="只看固定软件安装清单、大小和许可，不下载、不登录")
@@ -114,6 +123,16 @@ def parser() -> argparse.ArgumentParser:
     read.add_argument("--version")
     status = commands.add_parser("status", help="查看证据缺口，不重试任务")
     status.add_argument("--ref", required=True)
+    listing = commands.add_parser("list", help="分页列出已有资料；不访问平台或模型")
+    listing.add_argument("--limit", type=int, default=20)
+    listing.add_argument("--offset", type=int, default=0)
+    listing.add_argument("--version")
+    listing.add_argument("--source-kind", action="append", dest="source_kinds")
+    listing.add_argument("--scope-id")
+    listing.add_argument("--since")
+    listing.add_argument("--until")
+    listing.add_argument("--time-basis")
+    commands.add_parser("overview", help="查看已有资料概况；不启动任务")
     commands.add_parser("model-settings", help="只显示非密钥的三角色配置，不测试、不发模型请求")
     model = commands.add_parser("configure-model", help="本地配置模型角色；不发请求、不开自动处理")
     model.add_argument("--role", choices=("audio", "vision", "summary"), required=True)
@@ -260,13 +279,48 @@ def no_model_authority(_: str) -> str:
     raise ContextError("processing_authorization_required", "来源同步未授权模型请求或秘密读取。")
 
 
+def read_request(args: argparse.Namespace) -> tuple[str, dict[str, Any]]:
+    """Use the same bounded, transport-neutral contract for either library layout."""
+    if args.command in {"search", "list"}:
+        filters = {
+            key: getattr(args, key)
+            for key in ("source_kinds", "scope_id", "since", "until", "time_basis")
+            if getattr(args, key) is not None
+        }
+        arguments = {"limit": args.limit, "filters": filters, "offset": args.offset, "version": args.version}
+        if args.command == "search":
+            return "search_collections", {**arguments, "query": args.query}
+        return "list_collections", arguments
+    if args.command == "read":
+        return "read_collection", {
+            "material_ref": args.ref,
+            "artifact": args.artifact,
+            "offset": args.offset,
+            "max_chars": args.max_chars,
+            "version": args.version,
+        }
+    if args.command == "status":
+        return "collection_status", {"material_ref": args.ref}
+    if args.command == "overview":
+        return "library_overview", {}
+    raise ContextError("permission_denied", "旧库只支持 search、read、status、list、overview；未更改资料。")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     data: Any
     store = None
+    legacy_reader = None
     secrets: CredentialBackend | None = None
     try:
-        if args.command == "runtime-options":
+        if args.legacy_vault:
+            # Refuse every other command before opening a workspace or any credential backend.
+            action, arguments = read_request(args)
+            legacy_reader = LegacyLayoutReader(args.workspace)
+            result = ReadGateway(legacy_reader).dispatch(action, arguments)
+            print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+            return 0 if result["ok"] else 1
+        elif args.command == "runtime-options":
             from collection_context.application.runtime_setup import runtime_options
 
             data = runtime_options()
@@ -315,7 +369,11 @@ def main(argv: list[str] | None = None) -> int:
         else:
             store = LibraryStore(args.workspace)
             service = ContextService(store)
-            if args.command == "upgrade-writer":
+            if args.command in LEGACY_READ_COMMANDS:
+                result = ReadGateway(service).dispatch(*read_request(args))
+                print(json.dumps(result, ensure_ascii=False, allow_nan=False))
+                return 0 if result["ok"] else 1
+            elif args.command == "upgrade-writer":
                 data = store.upgrade_writer()
             elif args.command == "rebuild-index":
                 data = FileIndex(store).rebuild()
@@ -387,23 +445,6 @@ def main(argv: list[str] | None = None) -> int:
                 return 0 if result["ok"] else 1
             elif args.command == "revoke-access":
                 data = AccessRegistry(store).revoke(args.principal)
-            elif args.command == "search":
-                filters = {
-                    key: getattr(args, key)
-                    for key in ("source_kinds", "scope_id", "since", "until", "time_basis")
-                    if getattr(args, key) is not None
-                }
-                data = service.search(
-                    args.query, limit=args.limit, filters=filters, offset=args.offset, version=args.version
-                )
-            elif args.command == "read":
-                data = service.read(
-                    args.ref,
-                    artifact=args.artifact,
-                    offset=args.offset,
-                    max_chars=args.max_chars,
-                    version=args.version,
-                )
             elif args.command == "model-settings":
                 data = ModelCatalog(store).public_settings()
             elif args.command == "configure-model":
@@ -652,7 +693,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.url, limit=args.limit, download=args.download
                         )
             else:
-                data = service.status(args.ref)
+                raise ContextError("invalid_argument", "命令未实现。")
         output, status = envelope(data), 0
     except ContextError as error:
         output, status = envelope(error=error), 1
@@ -661,6 +702,8 @@ def main(argv: list[str] | None = None) -> int:
             secrets.close()
         if store is not None:
             store.close()
+        if legacy_reader is not None:
+            legacy_reader.close()
     print(json.dumps(output, ensure_ascii=False, allow_nan=False))
     return status
 

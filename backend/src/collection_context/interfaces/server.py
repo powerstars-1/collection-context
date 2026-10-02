@@ -20,6 +20,9 @@ from collection_context.library.store import LibraryStore
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="收藏上下文：认证读接口与管理页（开发版）")
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument(
+        "--legacy-vault", type=Path, help="明确连接旧抖音资料目录；workspace仅作为独立访问配置，此服务只读"
+    )
     parser.add_argument("--runtime-dir", type=Path, help="固定的库外运行依赖目录；仅由启动者配置")
     parser.add_argument("--origin", default="http://127.0.0.1:8787")
     parser.add_argument("--bind", default="127.0.0.1")
@@ -37,6 +40,13 @@ def main(argv: list[str] | None = None) -> int:
     model_secrets: CredentialBackend | None = None
     connection_runner = None
     try:
+        if args.legacy_vault is not None and (
+            args.allow_model_config
+            or args.allow_source_connect
+            or args.credential_dir is not None
+            or args.browser_dir is not None
+        ):
+            raise ContextError("permission_denied", "旧库只读服务不能同时开启模型或来源连接。")
         if args.bind not in {"127.0.0.1", "::1", "localhost"} and not args.remote:
             raise ContextError("permission_denied", "默认只绑定回环地址。远程模式须显式启用并配置 TLS。")
         if args.remote and (not args.tls_cert or not args.tls_key):
@@ -94,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             refresh=lambda: registry.refresh(policy),
             model_secrets=model_secrets,
             connection_runner=connection_runner,
+            legacy_vault=args.legacy_vault,
         )
         uvicorn.run(
             app,

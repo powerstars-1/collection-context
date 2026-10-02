@@ -80,6 +80,18 @@ test("backend authorization expiry is reported and not retried", async (t) => {
   assert.equal(requests, 1);
 });
 
+test("legacy status permits only the encoded m1 reference and no general escapes", async(t)=>{
+  const paths=[];
+  installFetch(t,async(path)=>{paths.push(path);return response(200,{ok:true,data:{}})});
+  const api=createApi();
+  await api.request('/v1/collections/m1%3AQUJD_123/status');
+  for(const path of ['/v1/collections/m1%3AQUJD%2F123/status','/v1/collections/m1%3AQUJD%252F/status',
+    '/v1/%2e%2e/private','/v1/collections/m1%3AQUJD/frames']) {
+    await assert.rejects(()=>api.request(path));
+  }
+  assert.deepEqual(paths,['/v1/collections/m1%3AQUJD_123/status']);
+});
+
 test("backend envelope failures do not masquerade as successful data", async (t) => {
   installFetch(t, async () => response(200, { ok: false, error: { code: "forbidden", message: "not permitted" } }));
   await assert.rejects(createApi().request("/v1/management/overview", {}));

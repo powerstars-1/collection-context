@@ -9,7 +9,16 @@ export const sourceLabels = {liked:'喜欢',saved:'收藏',collection:'收藏夹
 const artifactLabels = {original:'原文',audio:'转写',screen:'画面文字',summary:'总结',readable:'可读全文',image:'图片理解',user_note:'备注'};
 const stateLabels = {ready:'已保存 · 精度需核对',missing:'尚未提取',not_applicable:'不适用',stale:'输入已变化',unavailable:'文件需核对'};
 const button = 'rounded-xl border border-zinc-200 px-3 py-2 text-sm text-zinc-700 transition hover:bg-zinc-50 disabled:opacity-45';
-const safeSource = (url) => /^https:\/\/www\.douyin\.com\/(video|note)\/\d+$/.test(url || '') ? url : null;
+const safeSource = (url) => {
+  try {
+    const parsed = new URL(url);
+    if(parsed.protocol!=='https:'||parsed.username||parsed.password||parsed.port||parsed.search||parsed.hash)return null;
+    const accepted = ['www.douyin.com','douyin.com'].includes(parsed.hostname)
+      ? /^\/(video|note)\/\d+\/?$/.test(parsed.pathname)
+      : parsed.hostname==='v.douyin.com' && /^\/[A-Za-z0-9_-]+\/?$/.test(parsed.pathname);
+    return accepted ? parsed.href : null;
+  } catch { return null; }
+};
 
 function SourceAction({item}) {
   const [copied,setCopied] = useState(false);
@@ -53,7 +62,7 @@ function Evidence({api,download,item,canManage,onChanged}) {
     <div className="rounded-3xl border border-zinc-200 bg-white p-6">
       <div className="text-xs text-zinc-400">资料详情 · 来源与证据</div>
       <h2 className="mt-2 text-xl font-semibold text-zinc-900">{item.title || '无标题资料'}</h2>
-      <p className="mt-2 text-sm text-zinc-500">{item.author || '作者未知'} · {item.media_type === 'video' ? '视频':'图文'} · 内容不自动等同于你的观点</p>
+      <p className="mt-2 text-sm text-zinc-500">{item.author || '作者未知'} · {item.media_type === 'video' ? '视频':item.media_type==='image'?'图文':'类型未知'} · 内容不自动等同于你的观点</p>
       <div className="mt-4 flex flex-wrap gap-2">{[...new Set((item.relations||[]).map(r=>r.kind))].map(kind=><span key={kind} className="rounded-lg bg-zinc-100 px-2 py-1 text-xs text-zinc-600">{sourceLabels[kind]||kind}</span>)}</div>
       <div className="mt-4"><SourceAction item={item}/></div>
       <p className="mt-4 break-all text-xs text-zinc-400">引用：{item.material_ref}</p>
@@ -69,7 +78,7 @@ function Evidence({api,download,item,canManage,onChanged}) {
       <pre id="evidence-text" className="mt-4 whitespace-pre-wrap break-words font-sans text-sm leading-7 text-zinc-700">{text || (!busy && !error ? '此项目前没有可读内容。缺失不代表原作品没有信息。':'')}</pre>
       {read?.next_offset!=null && <button type="button" className={button+' mt-4'} disabled={busy} onClick={()=>load(true)}>继续读取</button>}
     </div>
-    <FrameGallery api={api} materialRef={item.material_ref}/>
+    {status?.layout==='legacy_douyin_readonly'?<p className="text-xs leading-6 text-zinc-500">旧库模式提供已有文字读取；原始媒体和关键帧保留在原目录。</p>:status&&<FrameGallery api={api} materialRef={item.material_ref}/>}
     {canManage&&<ItemTools api={api} download={download} item={item} onChanged={onChanged}/>}
     {read && <details className="rounded-2xl border border-zinc-200 bg-white p-4"><summary className="cursor-pointer text-sm text-zinc-500">查看当前引用响应 JSON</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs text-zinc-600">{JSON.stringify(read,null,2)}</pre></details>}
   </div>;
@@ -103,7 +112,7 @@ export function Library({api,download,canManage=false,sourceKind=''}) {
   useEffect(()=>{void load();return ()=>{epoch.current++}},[committedQuery,sourceKind]);
   useEffect(()=>{
     const ref = new URLSearchParams(location.search).get('ref');
-    if (!ref || !/^[A-Za-z0-9_-]{1,160}$/.test(ref)) return;
+    if (!ref || !/^(?:[A-Za-z0-9_-]{1,160}|m1:[A-Za-z0-9_-]{1,1397})$/.test(ref)) return;
     const revision=++selectEpoch.current;
     api('/v1/collections/'+encodeURIComponent(ref)+'/status').then(item=>{
       if(revision!==selectEpoch.current)return;
@@ -111,7 +120,7 @@ export function Library({api,download,canManage=false,sourceKind=''}) {
     }).catch(err=>{if(revision===selectEpoch.current)setError(err.message)});
   },[api]);
   const item = items.find(row=>row.material_ref===selectedId);
-  const materials = items.map(row=>({id:row.material_ref,title:row.title||'无标题资料',platform:'抖音',mediaType:row.media_type==='video'?'视频':'图文',authorName:row.author||'作者未知',
+  const materials = items.map(row=>({id:row.material_ref,title:row.title||'无标题资料',platform:'抖音',mediaType:row.media_type==='video'?'视频':row.media_type==='image'?'图文':'类型未知',authorName:row.author||'作者未知',
     sources:[...new Set((row.relations||[]).map(rel=>sourceLabels[rel.kind]||rel.kind))].join(' / '),
     status:row.artifact_states?Object.entries(row.artifact_states).filter(([kind,state])=>kind!=='original'&&state==='ready').map(([kind])=>artifactLabels[kind]).join(' / ')||'原文已保存 · 提取待处理':'检索已命中 · 状态见详情'}));
   return <WorkbenchLayout title="收藏库" description="从喜欢和收藏中找回教程，让你的 AI 有据可答。"
@@ -120,10 +129,11 @@ export function Library({api,download,canManage=false,sourceKind=''}) {
         <input id="library-query" aria-label="搜索已有资料" className="w-full rounded-xl border border-zinc-200 px-3 py-2 text-sm" placeholder="搜索标题、作者或已提取的内容" value={query} onChange={event=>setQuery(event.target.value)}/>
         <div className="flex items-center gap-2"><button type="submit" className="rounded-xl bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-45" disabled={busy}>搜索收藏</button><button type="button" className={button} disabled={busy} onClick={()=>{setQuery('');committedQuery?setCommittedQuery(''):void load()}}>重置</button><span className="ml-auto text-xs text-zinc-400">{listing?.total_items??listing?.total_matches??'—'} 条</span></div>
       </form>
-      <p className="text-xs leading-5 text-zinc-400">只读已有资料，不访问抖音或请求模型。列表按首次发现排序，不能当作实际点赞时间。</p>
+      <p className="text-xs leading-5 text-zinc-400">{listing?.layout==='legacy_douyin_readonly'?'旧资料只读浏览，按资料引用排序。处理完整性和实际点赞时间未知。':'只读已有资料，不访问抖音或请求模型。列表按首次发现排序，不能当作实际点赞时间。'}</p>
+      {listing?.coverage?.partial&&<p role="status" className="rounded-xl bg-amber-50 p-3 text-sm text-amber-800">部分旧文件或附件无法读取，当前结果未覆盖全部资料。</p>}
       {error && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
       {busy && <p role="status" className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">正在读取资料…</p>}
-      {!busy&&!items.length&&!error && <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-500">当前范围没有资料。换一个关键词，或先去同步页添加作品。</div>}
+      {!busy&&!items.length&&!error && <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-500">{listing?.layout==='legacy_douyin_readonly'?'当前范围没有匹配资料。请调整关键词或来源筛选，或核对旧目录中的素材卡。':'当前范围没有资料。换一个关键词，或先去同步页添加作品。'}</div>}
       <MaterialList materials={materials} selectedIds={selectedId?[selectedId]:[]} onToggle={setSelectedId}/>
       {listing?.next_offset!=null && <button type="button" className={button} disabled={busy} onClick={()=>load(true)}>继续查看</button>}
       {canManage&&<ExcludedItems api={api} download={download} onChanged={()=>load()}/>}

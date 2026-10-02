@@ -5,7 +5,9 @@ export function createApi(onExpired = () => {}) {
   let active = 0;
   const pending = [];
   async function transport(path, value, options = {}, binary = false) {
-    if (!/^\/v1\/[A-Za-z0-9_/-]+$/.test(path) || path.includes('..')) throw new Error('只允许本机业务接口。');
+    const ordinary = typeof path==='string' && /^\/v1\/[A-Za-z0-9_/-]+$/.test(path);
+    const legacyStatus = typeof path==='string' && /^\/v1\/collections\/m1%3A[A-Za-z0-9_-]{1,1397}\/status$/.test(path);
+    if ((!ordinary&&!legacyStatus) || path.includes('..')) throw new Error('只允许本机业务接口。');
     const revision = generation;
     if(active>=2&&pending.length>=16) throw new Error('页面待处理请求过多，请等待当前操作完成。');
     if(active<2) active++;

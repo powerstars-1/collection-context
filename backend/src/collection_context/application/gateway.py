@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from collection_context.application.contracts import ContextError, canonical_bytes, envelope
-from collection_context.application.service import ContextService
+from collection_context.application.read_contract import ReadService
 
 READ_TOOLS = frozenset({"search_collections", "read_collection", "collection_status"})
 
 
 class ReadGateway:
-    def __init__(self, service: ContextService):
+    def __init__(self, service: ReadService):
         self.service = service
 
     def dispatch(self, action: str, arguments: dict[str, Any]) -> dict[str, Any]:

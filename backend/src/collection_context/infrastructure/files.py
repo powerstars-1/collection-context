@@ -143,6 +143,46 @@ class SafeFiles:
         finally:
             os.close(parent)
 
+    def list_directory(self, relative: str, *, max_entries: int = 10_000) -> list[dict[str, str]]:
+        """Bounded names/types from a pinned no-follow directory, without reading files."""
+        if type(max_entries) is not int or not 1 <= max_entries <= 100_000:
+            raise ContextError("invalid_argument", "目录项上限无效。")
+        parent, name = self._parent(relative)
+        directory = None
+        try:
+            directory = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            before = os.fstat(directory)
+            entries: list[dict[str, str]] = []
+            with os.scandir(directory) as scan:
+                for entry in scan:
+                    if len(entries) == max_entries:
+                        raise ContextError("scan_limit", "目录项超过只读扫描上限，未声称全库覆盖。")
+                    info = entry.stat(follow_symlinks=False)
+                    kind = (
+                        "directory"
+                        if stat.S_ISDIR(info.st_mode)
+                        else "file"
+                        if stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+                        else "unsafe"
+                    )
+                    entries.append({"name": entry.name, "kind": kind})
+            after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or not stat.S_ISDIR(
+                after.st_mode
+            ):
+                raise ContextError("version_changed", "扫描期间目录身份变化，未返回旧目录项。")
+            self.check_root()
+            return sorted(entries, key=lambda entry: entry["name"])
+        except FileNotFoundError:
+            self.check_root()
+            raise ContextError("not_found", "只读资料目录不存在。") from None
+        except OSError:
+            raise ContextError("forbidden_path", "只读资料目录不安全或不可访问。") from None
+        finally:
+            if directory is not None:
+                os.close(directory)
+            os.close(parent)
+
     def file_size(self, relative: str) -> int:
         """Count a stable regular single-link file without opening/reading its body."""
         parent, name = self._parent(relative)

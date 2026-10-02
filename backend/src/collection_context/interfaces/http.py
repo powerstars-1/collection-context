@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import re
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from http.cookies import CookieError, SimpleCookie
@@ -62,8 +63,15 @@ def decode_json(body: bytes) -> dict[str, Any]:
 
 
 class HttpBoundary:
-    def __init__(self, app, policy: AccessPolicy, refresh: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        app,
+        policy: AccessPolicy,
+        refresh: Callable[[], None] | None = None,
+        legacy_readonly: bool = False,
+    ):
         self.app, self.policy, self.refresh = app, policy, refresh
+        self.legacy_readonly = legacy_readonly
         self.active = 0
 
     async def __call__(self, scope, receive, send):
@@ -155,6 +163,22 @@ class HttpBoundary:
                     )
                 if not self.policy.rate_allowed("principal:" + credential.principal):
                     raise ContextError("rate_limited", "此凭据请求过于频繁。")
+                if self.legacy_readonly and not (
+                    (method, path)
+                    in {
+                        ("GET", "/v1/session"),
+                        ("POST", "/v1/session/logout"),
+                        ("POST", "/v1/collections/search"),
+                        ("POST", "/v1/collections/read"),
+                        ("POST", "/v1/collections/list"),
+                        ("GET", "/v1/collections/overview"),
+                    }
+                    or method == "GET"
+                    and re.fullmatch(r"/v1/collections/[^/]+/status", path)
+                ):
+                    raise ContextError(
+                        "permission_denied", "当前连接的是只读旧库，仅支持查看、搜索和文字读取。"
+                    )
                 state.update(credential=credential, session=session)
             except ContextError as error:
                 code = (
@@ -243,6 +267,7 @@ def create_app(
     refresh: Callable[[], None] | None = None,
     model_secrets: CredentialBackend | None = None,
     connection_runner: ConnectionRunner | None = None,
+    legacy_vault: Path | None = None,
 ):
     try:
         from fastapi import FastAPI, Request
@@ -251,14 +276,27 @@ def create_app(
         from starlette.exceptions import HTTPException
     except ImportError:
         raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
+    legacy_reader = None
+    if legacy_vault is not None:
+        if model_secrets is not None or connection_runner is not None:
+            raise ContextError("permission_denied", "旧库只读服务不能开启模型配置或来源连接。")
+        authority, source = workspace.resolve(), legacy_vault.resolve()
+        if authority == source or authority in source.parents or source in authority.parents:
+            raise ContextError("forbidden_path", "旧库和产品访问配置须使用互不包含的独立目录。")
     store = LibraryStore(workspace)
-    gateway = ReadGateway(ContextService(store))
     try:
+        if legacy_vault is not None:
+            from collection_context.library.legacy_layout import LegacyLayoutReader
+
+            legacy_reader = LegacyLayoutReader(legacy_vault)
+        gateway = ReadGateway(legacy_reader if legacy_reader is not None else ContextService(store))
         if model_secrets is not None:
             from collection_context.application.model_setup import separate_credentials
 
             separate_credentials(workspace, model_secrets.files.root)
     except BaseException:
+        if legacy_reader is not None:
+            legacy_reader.close()
         store.close()
         raise
 
@@ -295,10 +333,25 @@ def create_app(
         finally:
             if connection_runner is not None:
                 await run_in_threadpool(connection_runner.close)
+            if legacy_reader is not None:
+                legacy_reader.close()
             store.close()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
-    app.add_middleware(HttpBoundary, policy=policy, refresh=refresh)
+    app.add_middleware(
+        HttpBoundary, policy=policy, refresh=refresh, legacy_readonly=legacy_reader is not None
+    )
+
+    def public_session(credential, session):
+        result = policy.public_session(credential, session)
+        if legacy_reader is not None:
+            result["permissions"] = [
+                permission
+                for permission in result["permissions"]
+                if permission in {"collections:read", "ui:view"}
+            ]
+            result["library_mode"] = "legacy_readonly"
+        return result
 
     @app.get("/")
     @app.get("/connect")
@@ -554,7 +607,7 @@ def create_app(
             raise ContextError("invalid_argument", "页面登录只接收产品访问令牌。")
         credential = policy.authenticate("Bearer " + value["token"])
         key, session = policy.create_session(credential)
-        response = result_response(envelope(policy.public_session(credential, session)))
+        response = result_response(envelope(public_session(credential, session)))
         response.set_cookie(
             COOKIE_NAME,
             key,
@@ -572,9 +625,7 @@ def create_app(
     async def session_info(request):
         if request.query_params:
             raise ContextError("invalid_argument", "会话接口不接收查询参数。")
-        return result_response(
-            envelope(policy.public_session(request.state.credential, request.state.session))
-        )
+        return result_response(envelope(public_session(request.state.credential, request.state.session)))
 
     session_info.__annotations__["request"] = Request
     app.add_api_route("/v1/session", session_info, methods=["GET"])

@@ -57,7 +57,7 @@ export default function App() {
     return ()=>{alive=false};
   },[session,client]);
   useLayoutEffect(()=>{
-    if(!session)return;
+    if(!session||session.library_mode==='legacy_readonly')return;
     const manager=mountManagement({api:client.request,canManage:session.permissions.includes('ui:manage'),root:document.querySelector('[data-management-root]'),onOverview:setOverview});
     manager.show(page).catch(err=>setError(err.message));
     return ()=>manager.destroy();
@@ -75,7 +75,7 @@ export default function App() {
     <div className={`flex h-full flex-col overflow-hidden border border-white/80 bg-white/80 shadow-[0_24px_80px_-32px_rgba(15,23,42,0.18)] backdrop-blur-xl ${shellRadiusClass}`}>
       <TopNav page={navPage} onChange={navigate} density={density} onSearch={query=>location.assign('/?q='+encodeURIComponent(query))}/>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-zinc-100 bg-white/60 px-4 py-2 text-xs text-zinc-500">
-        <span>{session.permissions.includes('ui:manage')?'主人管理会话':'只读会话'}</span>
+        <span>{session.library_mode==='legacy_readonly'?'旧资料库 · 只读浏览':session.permissions.includes('ui:manage')?'主人管理会话':'只读会话'}</span>
         <span>已保存 {overview?.total_items??'—'} 条</span><span>尚无转写 {overview?.audio_missing??'—'} 条</span>
         <label className="ml-auto flex items-center gap-2">界面密度<select aria-label="界面密度" value={density} onChange={event=>setDensity(event.target.value)} className="rounded-lg border border-zinc-200 bg-white px-2 py-1"><option value="compact">紧凑</option><option value="standard">标准</option><option value="relaxed">宽松</option></select></label>
         <button type="button" className="rounded-lg border border-zinc-200 px-2 py-1 hover:bg-zinc-50" onClick={async()=>{
@@ -87,8 +87,8 @@ export default function App() {
         <SubNav page={navPage} active={sub} onChange={onSub} density={density}/>
         <main id="main-content" className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(255,255,255,0.40),rgba(248,250,252,0.76))]">
           {page==='materials'&&<Library api={client.request} download={client.download} canManage={session.permissions.includes('ui:manage')} sourceKind={kind}/>}
-          {page==='access'&&<div className="min-h-0 flex-1 overflow-y-auto"><Access/></div>}
-          <div hidden={page==='materials'||page==='access'} className="min-h-0 flex-1 overflow-y-auto"><LegacyPanels/></div>
+          {page==='access'&&<div className="min-h-0 flex-1 overflow-y-auto"><Access legacyReadonly={session.library_mode==='legacy_readonly'}/></div>}
+          <div hidden={page==='materials'||page==='access'} className="min-h-0 flex-1 overflow-y-auto">{session.library_mode==='legacy_readonly'?<div className="m-6 rounded-3xl border border-zinc-200 bg-white p-6"><h2 className="text-lg font-semibold">当前连接旧资料库</h2><p className="mt-3 text-sm leading-7 text-zinc-500">此连接支持浏览、搜索和 AI 读取。旧库没有本产品的同步任务、模型配置或处理记录。</p><a href="/" className="mt-4 inline-block rounded-xl bg-zinc-900 px-4 py-2 text-sm text-white">返回收藏库</a></div>:<LegacyPanels/>}</div>
         </main>
       </div>
     </div>

@@ -15,6 +15,7 @@ from collection_context.application.contracts import ContextError
 from collection_context.application.gateway import READ_TOOLS, ReadGateway
 from collection_context.application.service import ContextService
 from collection_context.interfaces.access import AccessRegistry
+from collection_context.library.legacy_layout import LegacyLayoutReader
 from collection_context.library.store import LibraryStore
 
 
@@ -114,13 +115,23 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="收藏上下文：三个只读 MCP 工具")
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument(
+        "--legacy-vault", action="store_true", help="只读打开旧 Markdown 库；不初始化、迁移或开放添加工具"
+    )
+    parser.add_argument(
         "--allow-add",
         action="store_true",
         help="显式开启受限添加；需环境COLLECTION_CONTEXT_ACCESS_TOKEN中的独立添加口令",
     )
     args = parser.parse_args(argv)
     store = None
+    legacy_reader = None
     try:
+        if args.legacy_vault:
+            if args.allow_add:
+                raise ContextError("permission_denied", "旧库只读接入不能开启 --allow-add；未读取添加凭据。")
+            legacy_reader = LegacyLayoutReader(args.workspace)
+            build_server(ReadGateway(legacy_reader)).run(transport="stdio")
+            return 0
         store = LibraryStore(args.workspace)
         additions = None
         if args.allow_add:
@@ -141,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if store is not None:
             store.close()
+        if legacy_reader is not None:
+            legacy_reader.close()
 
 
 if __name__ == "__main__":
