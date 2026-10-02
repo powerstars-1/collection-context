@@ -60,6 +60,7 @@ def summarize(text):
         "## 概要\n保留导航[f_000000]，覆盖一张图[source_coverage]。",
         '{"概要":"保留导航[f_000000]","可复用提示词":"保留导航，禁止额外文字。"}',
         "## 可复用提示词\n逐字提示词：保留导航，禁止额外文字。[f_000000][原文]",
+        "## 参数\n画布390 x 844、圆角16px[a_000000]。\n## 提示词\n“提示词：保留导航，禁止额外文字。”[原文][a_000000]",
     ],
 )
 def test_observed_false_citation_and_json_reading_draft_are_not_ready(reply):
@@ -83,3 +84,52 @@ def test_verbatim_original_quote_remains_supported():
     )
     assert result.status == "ready"
     assert result.output["warnings"] == []
+
+
+def test_registered_text_cannot_reuse_its_embedded_previous_frame_citations():
+    class Response:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            pass
+
+        def read(self, limit):
+            return json.dumps(
+                {
+                    "choices": [
+                        {"message": {"content": "正文第一页保留导航[f_000000]。"}, "finish_reason": "stop"}
+                    ]
+                }
+            ).encode()
+
+    client = CloudModelClient(
+        ModelProfile("https://fixture.invalid/v1", "fixture", "synthetic-not-live-key"),
+        transport=lambda *a, **kw: Response(),
+    )
+    snapshot_id = "t_" + "1" * 64
+    stage = summary_stage(
+        "i_text_snapshot",
+        {"title": "修正后的正文", "body": ""},
+        ("text_screen",),
+        client,
+        source_coverage={},
+        registered_text_refs=True,
+    )
+    result = stage.invoke(
+        {
+            "text_screen": {
+                "status": "ready",
+                "output": {
+                    "kind": "screen",
+                    "evidence_id": snapshot_id,
+                    "text": "## [f_000000] 原图第1页\n\n保留导航。\n人工补充：蓝莓网格390。",
+                },
+            }
+        }
+    )
+    assert result.status == "partial" and result.output["warnings"]
+    assert result.output["available_evidence_refs"] == [snapshot_id]
+    assert result.output["cited_evidence_refs"] == ["f_000000"]
