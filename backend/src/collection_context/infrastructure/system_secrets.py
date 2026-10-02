@@ -9,9 +9,7 @@ preserves the system item and requires explicit diagnosis rather than guessing.
 from __future__ import annotations
 
 import json
-import os
 import re
-import stat
 import sys
 import threading
 import uuid
@@ -59,13 +57,7 @@ def _backend_or_default(backend: _SystemItems | None) -> _SystemItems:
 
 
 def _private_root(files: SafeFiles) -> None:
-    files.check_root()
-    try:
-        info = os.fstat(files.fd)
-    except OSError:
-        raise ContextError("storage_unavailable", "凭据目录不可用；未访问系统凭据。") from None
-    if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
-        raise ContextError("unsafe_secret_permissions", "凭据目录须由运行用户拥有且仅当前用户可访问。")
+    files.require_private_root()
 
 
 def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

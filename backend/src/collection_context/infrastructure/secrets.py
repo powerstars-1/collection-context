@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import stat
 import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -48,10 +47,7 @@ class FileSecrets:
         return cls(root)
 
     def _check(self) -> None:
-        self.files.check_root()
-        info = os.fstat(self.files.fd)
-        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077 or info.st_uid != os.getuid():
-            raise ContextError("unsafe_secret_permissions", "凭据目录须由运行用户拥有且仅允许该用户访问。")
+        self.files.require_private_root()
         try:
             # Presence alone (including a broken link or damaged manifest) means
             # this cannot be a legacy plaintext backend. Never parse metadata as

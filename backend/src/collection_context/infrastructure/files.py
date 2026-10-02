@@ -41,6 +41,35 @@ class SafeFiles:
         except OSError:
             raise ContextError("storage_unavailable", "资料库路径已变更或磁盘已断开；停止写入。") from None
 
+    def require_private_root(self) -> None:
+        """Platform-neutral caller contract; this backend proves POSIX ownership.
+
+        Do not infer privacy from pathname/mkdir alone. Ignore ordinary directory
+        content timestamps, but recheck pinned identity, owner and access mode.
+        Windows implements the same operation using its native private DACL.
+        """
+        self.check_root()
+        try:
+            before = os.fstat(self.fd)
+            if (
+                not stat.S_ISDIR(before.st_mode)
+                or (before.st_dev, before.st_ino) != self.identity
+                or before.st_mode & 0o077
+                or before.st_uid != os.getuid()
+            ):
+                raise ContextError("unsafe_secret_permissions", "私有目录须由运行用户拥有且仅该用户可访问。")
+            after = os.fstat(self.fd)
+            if (before.st_dev, before.st_ino, before.st_uid, before.st_mode) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_uid,
+                after.st_mode,
+            ):
+                raise ContextError("version_changed", "私有目录身份或权限在核对期间变化；未继续操作。")
+            self.check_root()
+        except OSError:
+            raise ContextError("storage_unavailable", "私有目录不可用；未访问系统凭据。") from None
+
     @staticmethod
     def parts(relative: str) -> list[str]:
         if not isinstance(relative, str) or not relative or len(relative) > 1024:

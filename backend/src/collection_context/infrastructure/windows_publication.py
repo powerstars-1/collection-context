@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ctypes
 import uuid
+from collections.abc import Callable
 
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.windows_native import (
@@ -65,7 +66,13 @@ class WindowsPublication:
         return function
 
     def write(
-        self, parent: NativeHandle, component: str, body: bytes, *, replace: bool = False
+        self,
+        parent: NativeHandle,
+        component: str,
+        body: bytes,
+        *,
+        replace: bool = False,
+        _check_attachment: Callable[[], None] | None = None,
     ) -> FileIdentity:
         """Write complete bytes, flush and verify, then rename once in this parent.
 
@@ -81,6 +88,8 @@ class WindowsPublication:
             raise ContextError("forbidden_path", "发布需要本适配器拥有的目录句柄。")
         rename = self._rename_function()  # Missing capability fails before creation.
         with parent._io_lock:
+            if _check_attachment is not None:
+                _check_attachment()
             parent_identity = self.native.information(parent).identity
             self.native.require_private_security(parent)
             security = self.native.private_security()
@@ -117,6 +126,8 @@ class WindowsPublication:
                         raise ContextError("version_changed", "提交前运行身份变化。")
                     self.native.information(stage)
                     self.native.information(parent)
+                    if _check_attachment is not None:
+                        _check_attachment()
                     encoded = component.encode("utf-16-le")
                     # The documented minimum includes sizeof(struct), not just
                     # the filename offset. Extra bytes are zeroed, not a path.
@@ -155,6 +166,8 @@ class WindowsPublication:
                         if self.native.read_file(result, max_bytes=len(body), private=True) != body:
                             raise ContextError("version_changed", "提交后的文件内容变化。")
                         self.native.require_private_security(parent)
+                        if _check_attachment is not None:
+                            _check_attachment()
                         return result.identity
             except BaseException as error:
                 if not isinstance(error, Exception):

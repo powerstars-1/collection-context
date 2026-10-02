@@ -93,7 +93,7 @@ class PublicationDLLs(SecurityDLLs):
         request = ctypes.cast(attributes, ctypes.POINTER(native.ObjectAttributes)).contents
         string = request.ObjectName.contents
         name = ctypes.string_at(string.Buffer, string.Length).decode("utf-16-le")
-        key = (request.RootDirectory, name.casefold())
+        key = self.name_key(request.RootDirectory, name)
         existing = self.names.get(key)
         if disposition == 2 and existing is not None:
             return -1073741771  # C0000035 name collision
@@ -104,8 +104,11 @@ class PublicationDLLs(SecurityDLLs):
         )
         value = ctypes.cast(output, ctypes.POINTER(native.HANDLE)).contents.value
         if disposition == 2:
-            assert request.SecurityDescriptor and shares == 0
-            assert access & 0x10000 and access & 0x40000000
+            assert request.SecurityDescriptor
+            if options & 1:
+                assert shares == 3 and not access & 0x40010000
+            else:
+                assert shares == 0 and access & 0x10000 and access & 0x40000000
             sd = ctypes.cast(request.SecurityDescriptor, ctypes.POINTER(security.AbsoluteDescriptor)).contents
             assert sd.Revision == 1 and sd.Control == 0x1004 and not sd.Group and not sd.Sacl
             # Only pointers produced by the owned construction buffers above.
@@ -126,6 +129,10 @@ class PublicationDLLs(SecurityDLLs):
             self.open_hook(value, name, disposition)
         return result
 
+    def name_key(self, parent, name):
+        identity = None if parent is None else int.from_bytes(self.files[parent]["id"], "little")
+        return identity, name.casefold()
+
     def security_info(self, handle, flags, buffer, capacity, needed):
         original = self.sd
         self.sd = self.descriptors.get(handle.value, self.sd)
@@ -141,7 +148,7 @@ class PublicationDLLs(SecurityDLLs):
         assert raw[1:8] == bytes(7) and header.ReplaceIfExists in {0, 1}
         assert raw[20 + header.FileNameLength :] == bytes(length - 20 - header.FileNameLength)
         name = raw[20 : 20 + header.FileNameLength].decode("utf-16-le")
-        key = (header.RootDirectory, name.casefold())
+        key = self.name_key(header.RootDirectory, name)
         self.renames.append((handle.value, key, bool(header.ReplaceIfExists)))
         if not header.ReplaceIfExists and key in self.names:
             return -1073741771

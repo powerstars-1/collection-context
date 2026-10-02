@@ -20,6 +20,7 @@ https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepo
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setendoffile
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-querydosdevicew
 https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
 
 The caller owns sequencing: handles are not transferable between adapters or
@@ -381,6 +382,7 @@ class WindowsNative:
             (dlls.kernel32, "CloseHandle", I32, [HANDLE]),
             (dlls.kernel32, "GetFileType", U32, [HANDLE]),
             (dlls.kernel32, "GetDriveTypeW", U32, [ctypes.POINTER(U16)]),
+            (dlls.kernel32, "QueryDosDeviceW", U32, [ctypes.POINTER(U16), ctypes.POINTER(U16), U32]),
             (dlls.kernel32, "GetFileInformationByHandleEx", I32, [HANDLE, U32, HANDLE, U32]),
             (dlls.kernel32, "SetFilePointerEx", I32, [HANDLE, I64, ctypes.POINTER(I64), U32]),
             (dlls.kernel32, "ReadFile", I32, [HANDLE, HANDLE, U32, ctypes.POINTER(U32), HANDLE]),
@@ -416,8 +418,7 @@ class WindowsNative:
             return ContextError("version_changed", "文件正由其他操作修改或替换。", retryable=True)
         return ContextError("storage_unavailable", "原生文件打开失败；不会回退普通路径。")
 
-    def open_root_directory(self, path: str) -> NativeHandle:
-        name = _root_name(path)
+    def _drive_target(self, path: str) -> str:
         drive_buffer, drive_name = _utf16_name(path[:3])
         # Drive-letter spelling alone does not exclude mapped network drives.
         # Unknown/unavailable/remote/optical/RAM drive types are not claimed.
@@ -425,7 +426,66 @@ class WindowsNative:
         del drive_buffer
         if drive_type not in {2, 3}:  # DRIVE_REMOVABLE, DRIVE_FIXED
             raise ContextError("storage_unavailable", "这里只接受可用的本地固定或可移动磁盘。")
-        return self._open(name, None, "directory")
+        device_buffer, device_name = _utf16_name(path[:2])
+        target = (U16 * 1024)()
+        count = self._libraries().kernel32.QueryDosDeviceW(device_name.Buffer, target, len(target))
+        del device_buffer
+        if not 2 <= count <= len(target):
+            raise ContextError("storage_unavailable", "盘符映射不能在受控范围确认。")
+        try:
+            text = bytes(target)[: count * 2].decode("utf-16-le", errors="strict")
+        except UnicodeError:
+            raise ContextError("storage_unavailable", "盘符映射不是有效的本地设备。") from None
+        if not text.endswith("\x00\x00") or not all(text[:-2].split("\x00")):
+            raise ContextError("storage_unavailable", "盘符映射结构不完整。")
+        current = text.split("\x00", 1)[0]
+        # Query only the requested drive. Never enumerate or resolve SUBST/UNC,
+        # arbitrary DOS aliases, object-manager links, or previous mappings.
+        if not re.fullmatch(r"\\Device\\HarddiskVolume[0-9]{1,20}", current, flags=re.IGNORECASE):
+            raise ContextError("forbidden_path", "盘符不是允许的直接本地卷映射。")
+        return current
+
+    def open_root_directory(self, path: str) -> NativeHandle:
+        _root_name(path)  # Validate the caller spelling, do not open DOS aliases.
+        target = self._drive_target(path)
+        # DOS drive letters are namespace junctions. Resolve the bounded current
+        # mapping first; preserve OBJ_DONT_REPARSE for the actual device path.
+        handle = self._open(target + path[2:], None, "directory")
+        try:
+            if self._drive_target(path) != target:
+                raise ContextError("storage_unavailable", "打开期间盘符映射变化；未继续操作。")
+            self.information(handle)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
+
+    def create_directory(self, parent: NativeHandle, component: str) -> NativeHandle:
+        """Exclusive child creation with explicit protected private inheritance.
+
+        Parent spelling/attachment is the facade's responsibility; this method
+        only operates through the owned directory HANDLE. Existing collisions
+        never open, repair or replace an object implicitly.
+        """
+        validate_component(component)
+        self._value(parent)
+        if parent.role != "directory":
+            raise ContextError("forbidden_path", "目录创建需要本适配器拥有的目录句柄。")
+        with parent._io_lock:
+            self.information(parent)
+            security = self.private_security()
+            descriptor = security.creation_descriptor(directory=True)
+            self.information(parent)
+            handle = self._open(component, parent, "directory", _creation=descriptor)
+            try:
+                if security.current_user() != descriptor.user:
+                    raise ContextError("storage_unavailable", "创建目录时运行身份变化。")
+                self.require_private_security(handle)
+                self.information(parent)
+                return handle
+            except BaseException:
+                handle.close()
+                raise
 
     def open_relative(self, parent: NativeHandle, component: str, *, role: Role) -> NativeHandle:
         validate_component(component)
@@ -463,7 +523,7 @@ class WindowsNative:
             if _creation is None or parent is None:
                 raise ContextError("forbidden_path", "发布句柄只能由私有排他创建获得。")
             access |= 0x10000  # DELETE for handle-relative rename, never WRITE_DAC.
-        elif _creation is not None:
+        elif _creation is not None and (role != "directory" or parent is None):
             raise ContextError("forbidden_path", "创建权限与固定文件角色不匹配。")
         shares = {
             "directory": 3,

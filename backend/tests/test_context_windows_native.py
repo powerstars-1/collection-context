@@ -41,6 +41,10 @@ class FakeDLLs:
         self.file_type = 1
         self.drive_type = 3
         self.drives = []
+        self.device_target = "\\Device\\HarddiskVolume4"
+        self.device_queries = []
+        self.device_count = None
+        self.device_hook = None
         self.info_failure = None
         self.lock_ok = True
         self.unlock_ok = True
@@ -69,6 +73,7 @@ class FakeDLLs:
             CloseHandle=FakeFunction(self.close),
             GetFileType=FakeFunction(lambda _: self.file_type),
             GetDriveTypeW=FakeFunction(self.drive),
+            QueryDosDeviceW=FakeFunction(self.query_device),
             GetFileInformationByHandleEx=FakeFunction(self.info),
             SetFilePointerEx=FakeFunction(self.seek),
             ReadFile=FakeFunction(self.read),
@@ -84,6 +89,16 @@ class FakeDLLs:
     def drive(self, pointer):
         self.drives.append(ctypes.string_at(pointer, 6).decode("utf-16-le"))
         return self.drive_type
+
+    def query_device(self, device, target, capacity):
+        self.device_queries.append((ctypes.string_at(device, 4).decode("utf-16-le"), capacity))
+        body = (self.device_target + "\x00\x00").encode("utf-16-le")
+        if len(body) > capacity * 2:
+            return 0
+        ctypes.memmove(target, body, len(body))
+        if self.device_hook is not None:
+            self.device_hook()
+        return len(body) // 2 if self.device_count is None else self.device_count
 
     def open(self, output, access, attributes, io, allocation, attrs, shares, disposition, options, ea, size):
         request = ctypes.cast(attributes, ctypes.POINTER(native.ObjectAttributes)).contents
@@ -374,7 +389,7 @@ def test_root_rejects_nonlocal_ambiguous_or_alias_paths(dlls, path):
 def test_unicode_backing_is_utf16_and_root_relative_no_reparse_contract(dlls):
     with dlls.native.open_root_directory("C:\\中文 空格😀") as root:
         request = dlls.opened[-1]
-        assert request["name"] == "\\??\\C:\\中文 空格😀"
+        assert request["name"] == "\\Device\\HarddiskVolume4\\中文 空格😀"
         assert request["root"] is None
         assert request["length"] == len(request["name"].encode("utf-16-le"))
         assert request["capacity"] == request["length"] + 2
