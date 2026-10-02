@@ -62,21 +62,24 @@ def test_default_disabled_and_enabling_without_fee_authority_does_not_mutate(env
     assert env[0].snapshot() == before
 
 
-def test_owner_edit_blocks_before_secret_resolution_and_does_not_starve_automatic_queue(env, monkeypatch):
+@pytest.mark.parametrize("kind", ["original", "screen", "summary"])
+def test_owner_edit_blocks_before_secret_resolution_and_does_not_starve_automatic_queue(
+    env, monkeypatch, kind
+):
     enable(env)
     item, identity = prepared(env, "501")
     original_plan = env[3].prepare_plan(identity)
     artifact = env[0].save_artifact(
         item["id"],
-        "screen",
+        kind,
         "原始文字",
         processor_version="fixture",
         expected_content_hash=item["content_hash"],
     )
     (env[0].files.root / artifact["path"]).write_text("人工修正文字", encoding="utf-8")
     manager = LibraryManagement(env[0], authorize=lambda: None)
-    preview = manager.preview_edit(item["id"], artifact="screen")
-    manager.accept_edit(item["id"], artifact="screen", preview_token=preview["preview_token"], confirmed=True)
+    preview = manager.preview_edit(item["id"], artifact=kind)
+    manager.accept_edit(item["id"], artifact=kind, preview_token=preview["preview_token"], confirmed=True)
     _, other = prepared(env, "502")
     sent = requests(monkeypatch)
     monkeypatch.setattr(env[3], "resolve_secret", lambda _: pytest.fail("manual correction resolved secret"))
@@ -92,7 +95,7 @@ def test_owner_edit_blocks_before_secret_resolution_and_does_not_starve_automati
     assert env[3].executor.jobs.get(admitted[0])["payload"]["extraction"]["input_id"] == other
     assert env[4].status()["preparation_blocked_count"] == 1
     assert env[4].admit_new() == []
-    assert env[0].get(item["id"])["artifacts"]["screen"]["owner_edit"]
+    assert env[0].get(item["id"])["artifacts"][kind]["owner_edit"]
 
 
 def test_old_library_unknown_generation_and_unknown_action_time_are_not_new(env, monkeypatch):

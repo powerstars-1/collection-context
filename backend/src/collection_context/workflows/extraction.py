@@ -64,7 +64,7 @@ class ExtractionWorkflow:
         if any(
             value.get("owner_edit")
             for kind, value in current["artifacts"].items()
-            if kind in {"audio", "screen", "image", "summary", "readable"}
+            if kind in {"original", "audio", "screen", "image", "summary", "readable"}
         ):
             raise ContextError("owner_edit_conflict", "资料含已确认的人工修改，未覆盖或提交模型请求。")
         roles = {"vision", "summary"} | ({"audio"} if payload["audio"] else set())
