@@ -22,6 +22,7 @@ from collection_context.application.contracts import ContextError
 from collection_context.application.execution_runner import ExecutionRunner
 from collection_context.application.launcher_capabilities import LauncherCapabilities, launcher_resources
 from collection_context.diagnostics import default_workspace, startup_report, workspace_report
+from collection_context.infrastructure.web_runtime import web_runtime_options
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.http import create_app
 from collection_context.interfaces.security import AccessPolicy
@@ -302,11 +303,7 @@ def launch(
             app,
             host=LOOPBACK,
             port=port,
-            proxy_headers=False,
-            access_log=False,
-            log_level="warning",
-            limit_concurrency=20,
-            timeout_keep_alive=5,
+            **web_runtime_options(),
         )
         server = uvicorn.Server(config)
         execution = getattr(app.state, "execution_runner", None)

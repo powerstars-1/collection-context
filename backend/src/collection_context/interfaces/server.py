@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.secrets import CredentialBackend, FileSecrets
 from collection_context.infrastructure.system_secrets import SystemSecrets
+from collection_context.infrastructure.web_runtime import web_runtime_options
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.http import create_app
 from collection_context.interfaces.security import AccessPolicy
@@ -98,11 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             app,
             host=args.bind,
             port=port,
-            proxy_headers=False,
-            access_log=False,
-            log_level="warning",
-            limit_concurrency=20,
-            timeout_keep_alive=5,
+            **web_runtime_options(),
             ssl_certfile=str(args.tls_cert) if args.tls_cert else None,
             ssl_keyfile=str(args.tls_key) if args.tls_key else None,
         )
