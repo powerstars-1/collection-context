@@ -235,21 +235,37 @@ class LibraryStore:
         mutation: Callable[[dict[str, Any]], Any],
         *,
         before_commit: Callable[[], None] | None = None,
+        skip_unchanged: bool = False,
     ) -> Any:
+        """Optional no-op elision is decided from canonical state under the writer.
+
+        Only explicitly opting-in callers may avoid an unchanged publication.
+        Ownership, configuration, mutation guards and before_commit still run;
+        a mutation result alone is never evidence that no state changed.
+        """
+        if type(skip_unchanged) is not bool:
+            raise ContextError("invalid_argument", "空事务策略须为明确布尔值。")
         with self.writer() as owner:
             state = self.snapshot()
             from collection_context.library.index import FileIndex, library_version
 
+            before_state = canonical_bytes(state) if skip_unchanged else None
             before_library_version = library_version(state)
             result = mutation(state)
             self._check_writer(owner)
-            state["generation"] += 1
 
             def check_commit():
                 self._check_writer(owner)
                 if before_commit is not None:
                     before_commit()
 
+            if skip_unchanged and canonical_bytes(state) == before_state:
+                check_commit()
+                # A callback may revoke authorization or replace a boundary.
+                # No-op success must fail closed just like a real publication.
+                self._check_writer(owner)
+                return copy.deepcopy(result)
+            state["generation"] += 1
             self._publish(self.files, state, before_commit=check_commit)
             if library_version(state) != before_library_version:
                 try:

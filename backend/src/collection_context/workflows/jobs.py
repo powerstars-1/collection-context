@@ -358,7 +358,10 @@ class JobManager:
                 recovered.append(job)
             return recovered
 
-        return self.store.transact(change)
+        # Recovery may legitimately find nothing after obtaining executor
+        # ownership. Confirm that no state changed inside the writer boundary;
+        # do not publish an otherwise identical generation for that case.
+        return self.store.transact(change, skip_unchanged=True)
 
     def set_stage(
         self,

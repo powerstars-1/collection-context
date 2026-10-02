@@ -82,8 +82,12 @@ def test_original_executor_publishes_intent_and_completion_as_two_atomic_boundar
     stage_descriptor = finished["stages"]["vision"]["result"]
     assert stage_descriptor == finished["calls"][0]["result"]
     assert executor.jobs.read_result(stage_descriptor)["usage"] == {"total_tokens": 5}
-    # No change to recovery/start/finish commits; only the two paid boundaries are coalesced.
-    assert len(commits) == 5
+    # Empty recovery is no longer published. Start, durable intent, durable
+    # result/completion, and finish remain four distinct committed states.
+    assert len(commits) == 4
+    started = commits[0]["jobs"][job["id"]]
+    assert started["state"] == "running" and started["calls"] == []
+    assert started["stages"] == {}
 
 
 def test_cancellation_retains_late_paid_result_but_does_not_mark_stage_ready(store):
