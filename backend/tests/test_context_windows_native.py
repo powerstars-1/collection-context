@@ -45,12 +45,36 @@ class FakeDLLs:
         self.lock_ok = True
         self.unlock_ok = True
         self.bad_open_info = {}
+        self.positions = {}
+        self.seeks = []
+        self.reads = []
+        self.seek_ok = True
+        self.seek_result = 0
+        self.read_ok = True
+        self.read_limit = 65_536
+        self.read_count_override = None
+        self.read_hook = None
+        self.writes = []
+        self.truncations = []
+        self.flushes = []
+        self.write_ok = True
+        self.write_limit = 65_536
+        self.write_count_override = None
+        self.write_hook = None
+        self.truncate_ok = True
+        self.flush_ok = True
+        self.flush_hook = None
         self.kernel32 = SimpleNamespace(
             SetHandleInformation=FakeFunction(self.set_flags),
             CloseHandle=FakeFunction(self.close),
             GetFileType=FakeFunction(lambda _: self.file_type),
             GetDriveTypeW=FakeFunction(self.drive),
             GetFileInformationByHandleEx=FakeFunction(self.info),
+            SetFilePointerEx=FakeFunction(self.seek),
+            ReadFile=FakeFunction(self.read),
+            WriteFile=FakeFunction(self.write),
+            SetEndOfFile=FakeFunction(self.truncate),
+            FlushFileBuffers=FakeFunction(self.flush),
             LockFileEx=FakeFunction(self.lock),
             UnlockFileEx=FakeFunction(self.unlock),
         )
@@ -86,6 +110,7 @@ class FakeDLLs:
         ctypes.cast(output, ctypes.POINTER(native.HANDLE)).contents.value = value
         directory = bool(options & 1)
         self.files[value] = {
+            "access": access,
             "directory": directory,
             "links": 1,
             "size": 12,
@@ -94,13 +119,70 @@ class FakeDLLs:
             "tag": 0,
             "delete": 0,
             "id": value.to_bytes(16, "little"),
+            "body": b"fixture-body",
             **self.bad_open_info,
         }
         return self.status
 
+    def seek(self, handle, distance, output, method):
+        self.seeks.append((handle.value, distance.value, method))
+        self.positions[handle.value] = self.seek_result
+        ctypes.cast(output, ctypes.POINTER(native.I64)).contents.value = self.seek_result
+        return int(self.seek_ok)
+
+    def read(self, handle, buffer, capacity, count, overlap):
+        self.reads.append((handle.value, capacity, overlap))
+        if not self.read_ok:
+            return 0
+        start = self.positions[handle.value]
+        body = self.files[handle.value]["body"][start : start + min(capacity, self.read_limit)]
+        ctypes.memmove(buffer, body, len(body))
+        self.positions[handle.value] += len(body)
+        ctypes.cast(count, ctypes.POINTER(native.U32)).contents.value = (
+            len(body) if self.read_count_override is None else self.read_count_override
+        )
+        if self.read_hook is not None:
+            self.read_hook(handle.value)
+        return 1
+
     def set_flags(self, handle, mask, value):
         self.flags.append((handle.value, mask, value))
         return int(self.inherit_ok)
+
+    def write(self, handle, buffer, capacity, count, overlap):
+        assert self.files[handle.value]["access"] & 0x40000000
+        self.writes.append((handle.value, capacity, overlap))
+        if not self.write_ok:
+            return 0
+        length = min(capacity, self.write_limit)
+        body = ctypes.string_at(buffer, length)
+        data, start = self.files[handle.value], self.positions[handle.value]
+        data["body"] = data["body"][:start] + body + data["body"][start + length :]
+        data["size"] = len(data["body"])
+        self.positions[handle.value] += length
+        ctypes.cast(count, ctypes.POINTER(native.U32)).contents.value = (
+            length if self.write_count_override is None else self.write_count_override
+        )
+        if self.write_hook is not None:
+            self.write_hook(handle.value)
+        return 1
+
+    def truncate(self, handle):
+        assert self.files[handle.value]["access"] & 0x40000000
+        self.truncations.append(handle.value)
+        if not self.truncate_ok:
+            return 0
+        data = self.files[handle.value]
+        data["body"] = data["body"][: self.positions[handle.value]]
+        data["size"] = len(data["body"])
+        return 1
+
+    def flush(self, handle):
+        assert self.files[handle.value]["access"] & 0x40000000
+        self.flushes.append(handle.value)
+        if self.flush_hook is not None:
+            self.flush_hook(handle.value)
+        return int(self.flush_ok)
 
     def close(self, handle):
         self.closed.append(handle.value)
@@ -124,7 +206,9 @@ class FakeDLLs:
             result.DeletePending = data["delete"]
         elif kind == 0:
             result = ctypes.cast(output, ctypes.POINTER(native.FileBasicInfo)).contents
-            result.CreationTime, result.LastWriteTime, result.ChangeTime = 1, 2, 3
+            result.CreationTime = data.get("creation_time", 1)
+            result.LastWriteTime = data.get("last_write_time", 2)
+            result.ChangeTime = data.get("change_time", 3)
             result.FileAttributes = data["attributes"]
         elif kind == 9:
             result = ctypes.cast(output, ctypes.POINTER(native.FileAttributeTagInfo)).contents
@@ -319,7 +403,7 @@ def test_unicode_backing_is_utf16_and_root_relative_no_reparse_contract(dlls):
     [
         ("directory", 0x001200A0, 3, 0x00200021),
         ("read_file", 0x00120081, 1, 0x00200060),
-        ("lease_file", 0x00120083, 7, 0x00200060),
+        ("lease_file", 0x40120081, 7, 0x00200060),
         ("lease_observer", 0x00120081, 7, 0x00200060),
     ],
 )
@@ -409,8 +493,9 @@ def test_acl_never_reports_fake_private_security_success(dlls):
         assert code(lambda: dlls.native.require_private_security(root)) == "unsupported_platform"
 
 
-def test_missing_native_symbol_fails_closed_before_any_open(dlls):
-    del dlls.kernel32.GetFileInformationByHandleEx
+@pytest.mark.parametrize("symbol", ["GetFileInformationByHandleEx", "ReadFile", "SetFilePointerEx"])
+def test_missing_native_symbol_fails_closed_before_any_open(dlls, symbol):
+    delattr(dlls.kernel32, symbol)
     assert code(lambda: dlls.native.open_root_directory("C:\\库")) == "unsupported_platform"
     assert not dlls.opened
 

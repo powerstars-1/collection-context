@@ -1,7 +1,9 @@
 """Unconnected Windows x64 primitives, NOT an accepted SafeFiles/lease backend.
 
-Only existing local-drive objects can be opened. No writes, installation,
-arbitrary access masks, or fallback path IO are provided. DLLs load lazily on
+Only existing local-drive objects can be opened and bounded file contents read.
+Existing lease metadata can be written under its own exclusive range lock; this
+is not atomic library publication. No creation, installation, arbitrary access
+masks, or fallback path IO are provided. DLLs load lazily on
 real Windows x64; ``_dlls`` injection is for call/layout tests, never acceptance.
 Private ACL validation remains explicitly unsupported.
 
@@ -11,11 +13,16 @@ https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attri
 https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
 https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setendoffile
+https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
 https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-e883-4972-9bbc-49e60bebca55
 
 The caller owns sequencing: handles are not transferable between adapters or
 to subprocesses. This draft does not implement a complete race-safe path
-facade, root reattachment checks, private ACL checks, read/write, or recovery.
+facade, root reattachment checks, private ACL checks, atomic writes, or recovery.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ import ctypes
 import os
 import platform
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -118,6 +126,8 @@ _INVALID_HANDLE = (1 << 64) - 1
 # Existing metadata is bounded to 65,536 bytes. A lock outside EOF lets a
 # read-only observer inspect metadata without reading an exclusive region.
 LEASE_LOCK_OFFSET = 1 << 20
+MAX_NATIVE_READ = 16_000_000
+_READ_CHUNK = 65_536
 _RESERVED = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"} | {
     prefix + digit for prefix in ("COM", "LPT") for digit in "123456789¹²³"
 }
@@ -237,6 +247,8 @@ class NativeHandle:
         self._role = role
         self._identity: FileIdentity | None = None
         self._locks = 0
+        self._active_lock: NativeLock | None = None
+        self._io_lock = threading.RLock()
 
     @property
     def closed(self) -> bool:
@@ -254,11 +266,12 @@ class NativeHandle:
         return self._identity
 
     def close(self) -> None:
-        if self.closed:
-            return
-        value, self._value = self._value, 0
-        if not self._owner._libraries().kernel32.CloseHandle(HANDLE(value)):
-            raise ContextError("storage_unavailable", "原生文件句柄关闭失败。")
+        with self._io_lock:
+            if self.closed:
+                return
+            value, self._value = self._value, 0
+            if not self._owner._libraries().kernel32.CloseHandle(HANDLE(value)):
+                raise ContextError("storage_unavailable", "原生文件句柄关闭失败。")
 
     def __enter__(self) -> NativeHandle:
         self._owner._value(self)
@@ -271,24 +284,32 @@ class NativeHandle:
 class NativeLock:
     """One nonblocking kernel range lock; does not own the file HANDLE."""
 
-    def __init__(self, handle: NativeHandle, overlap: Overlapped, identity: FileIdentity):
+    def __init__(self, handle: NativeHandle, overlap: Overlapped, identity: FileIdentity, *, exclusive: bool):
         self._handle = handle
         self._overlap = overlap
         self.identity = identity
+        self._exclusive = exclusive
         self.closed = False
 
+    @property
+    def exclusive(self) -> bool:
+        return self._exclusive
+
     def close(self) -> None:
-        if self.closed:
-            return
-        # CloseHandle already releases the kernel lock; never unlock a reused HANDLE.
-        if not self._handle.closed:
-            owner = self._handle._owner
-            if not owner._libraries().kernel32.UnlockFileEx(
-                HANDLE(owner._value(self._handle)), 0, 1, 0, ctypes.byref(self._overlap)
-            ):
-                raise ContextError("storage_unavailable", "原生所有权锁释放失败。")
-        self.closed = True
-        self._handle._locks = 0
+        with self._handle._io_lock:
+            if self.closed:
+                return
+            # Invalidate local write authority even when the unlock outcome is unknown.
+            self._handle._active_lock = None
+            # CloseHandle already releases the kernel lock; never unlock a reused HANDLE.
+            if not self._handle.closed:
+                owner = self._handle._owner
+                if not owner._libraries().kernel32.UnlockFileEx(
+                    HANDLE(owner._value(self._handle)), 0, 1, 0, ctypes.byref(self._overlap)
+                ):
+                    raise ContextError("storage_unavailable", "原生所有权锁释放失败。")
+            self.closed = True
+            self._handle._locks = 0
 
     def __enter__(self) -> NativeLock:
         if self.closed:
@@ -353,6 +374,11 @@ class WindowsNative:
             (dlls.kernel32, "GetFileType", U32, [HANDLE]),
             (dlls.kernel32, "GetDriveTypeW", U32, [ctypes.POINTER(U16)]),
             (dlls.kernel32, "GetFileInformationByHandleEx", I32, [HANDLE, U32, HANDLE, U32]),
+            (dlls.kernel32, "SetFilePointerEx", I32, [HANDLE, I64, ctypes.POINTER(I64), U32]),
+            (dlls.kernel32, "ReadFile", I32, [HANDLE, HANDLE, U32, ctypes.POINTER(U32), HANDLE]),
+            (dlls.kernel32, "WriteFile", I32, [HANDLE, HANDLE, U32, ctypes.POINTER(U32), HANDLE]),
+            (dlls.kernel32, "SetEndOfFile", I32, [HANDLE]),
+            (dlls.kernel32, "FlushFileBuffers", I32, [HANDLE]),
             (dlls.kernel32, "LockFileEx", I32, [HANDLE, U32, U32, U32, U32, ctypes.POINTER(Overlapped)]),
             (dlls.kernel32, "UnlockFileEx", I32, [HANDLE, U32, U32, U32, ctypes.POINTER(Overlapped)]),
         ]
@@ -413,7 +439,9 @@ class WindowsNative:
         access = _SYNCHRONIZE | _READ_CONTROL | _FILE_READ_ATTRIBUTES
         access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
         if role == "lease_file":
-            access |= 0x2  # WRITE_DATA, never arbitrary access from a caller
+            # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
+            # WRITE_DATA. This fixed role never requests DELETE/WRITE_DAC.
+            access |= 0x40000000
         shares = {"directory": 3, "read_file": 1, "lease_file": 7, "lease_observer": 7}[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT
         options |= _FILE_DIRECTORY_FILE if role == "directory" else _FILE_NON_DIRECTORY_FILE
@@ -498,7 +526,58 @@ class WindowsNative:
             raise ContextError("lock_changed", "原生文件句柄身份发生变化。")
         return result
 
+    def read_file(self, handle: NativeHandle, *, max_bytes: int = MAX_NATIVE_READ) -> bytes:
+        """Bounded synchronous read from an owned file HANDLE, never path fallback.
+
+        Serialize rewind/read/close on this handle. Do not promise an IO deadline
+        or cancellation: a native synchronous read can wait for the OS/device.
+        This is not private-file authorization; that requires the ACL adapter.
+        """
+        if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_NATIVE_READ:
+            raise ContextError("invalid_argument", "原生读取大小上限无效。")
+        self._value(handle)
+        if handle.role not in {"read_file", "lease_file", "lease_observer"}:
+            raise ContextError("forbidden_path", "只允许读取固定文件角色的句柄。")
+        limit = min(max_bytes, 65_536) if handle.role != "read_file" else max_bytes
+        with handle._io_lock:
+            before = self.information(handle)
+            if before.size > limit:
+                raise ContextError("forbidden_path", "文件超过受控读取大小。")
+            dlls = self._libraries()
+            value, position = HANDLE(self._value(handle)), I64(-1)
+            if not dlls.kernel32.SetFilePointerEx(value, I64(0), ctypes.byref(position), 0):
+                raise ContextError("storage_unavailable", "原生文件位置无法确认。")
+            if position.value != 0:
+                raise ContextError("storage_unavailable", "原生文件位置不符合读取边界。")
+            body = bytearray()
+            while len(body) <= limit:
+                capacity = min(_READ_CHUNK, limit + 1 - len(body))
+                buffer, count = ctypes.create_string_buffer(capacity), U32()
+                success = dlls.kernel32.ReadFile(
+                    HANDLE(self._value(handle)), buffer, capacity, ctypes.byref(count), None
+                )
+                if not success:
+                    if dlls.last_error() == 38 and count.value == 0:  # ERROR_HANDLE_EOF
+                        break
+                    raise ContextError("storage_unavailable", "原生文件读取失败，未返回部分内容。")
+                if count.value > capacity:
+                    raise ContextError("storage_unavailable", "原生读取长度不符合缓冲区边界。")
+                if count.value == 0:
+                    break
+                body.extend(buffer.raw[: count.value])
+                if len(body) > limit:
+                    raise ContextError("version_changed", "读取时文件超过原大小范围。", retryable=True)
+            after = self.information(handle)
+            if before != after or len(body) != before.size:
+                raise ContextError("version_changed", "读取时文件版本或长度发生变化。", retryable=True)
+            return bytes(body)
+
     def try_lock(self, handle: NativeHandle, *, exclusive: bool) -> NativeLock:
+        self._value(handle)
+        with handle._io_lock:
+            return self._try_lock(handle, exclusive=exclusive)
+
+    def _try_lock(self, handle: NativeHandle, *, exclusive: bool) -> NativeLock:
         self._value(handle)
         if type(exclusive) is not bool or handle.role not in {"lease_file", "lease_observer"}:
             raise ContextError("forbidden_path", "只有固定所有权角色可以获取文件锁。")
@@ -516,7 +595,8 @@ class WindowsNative:
                 raise ContextError("lock_busy", "已有执行者持有原生文件锁。", retryable=True)
             raise ContextError("storage_unavailable", "原生文件锁获取失败。")
         handle._locks = 1
-        lock = NativeLock(handle, overlap, before.identity)
+        lock = NativeLock(handle, overlap, before.identity, exclusive=exclusive)
+        handle._active_lock = lock
         try:
             if self.information(handle).identity != before.identity:
                 raise ContextError("lock_changed", "获取锁时文件身份发生变化。")
@@ -524,6 +604,76 @@ class WindowsNative:
         except BaseException:
             lock.close()
             raise
+
+    def write_lease_metadata(self, lock: NativeLock, body: bytes) -> None:
+        """Replace bounded metadata on an existing exclusively locked HANDLE.
+
+        Not an atomic commit: a partial native write/truncate/flush can leave
+        unknown content. Such failure invalidates this lock's write authority,
+        retains the kernel lock until explicitly closed, and never retries.
+        The eventual ownership backend must treat torn metadata as unknown.
+        """
+        if type(body) is not bytes or len(body) > 65_536:
+            raise ContextError("invalid_argument", "所有权元数据须为有界字节内容。")
+        if not isinstance(lock, NativeLock):
+            raise ContextError("forbidden_path", "写入需要本适配器持有的排他所有权锁。")
+        handle = lock._handle
+        self._value(handle)
+
+        def locked_value() -> HANDLE:
+            value = self._value(handle)
+            if (
+                lock.closed
+                or not lock.exclusive
+                or handle.role != "lease_file"
+                or handle._active_lock is not lock
+                or lock.identity != handle.identity
+            ):
+                raise ContextError("lock_changed", "排他所有权锁无效；没有写入。")
+            return HANDLE(value)
+
+        with handle._io_lock:
+            locked_value()
+            before = self.information(handle)
+            if before.size > 65_536:
+                raise ContextError("forbidden_path", "所有权元数据超过限制。")
+            dlls, position = self._libraries(), I64(-1)
+            if not dlls.kernel32.SetFilePointerEx(locked_value(), I64(0), ctypes.byref(position), 0):
+                raise ContextError("storage_unavailable", "原生文件位置无法确认。")
+            if position.value != 0:
+                raise ContextError("storage_unavailable", "原生文件位置不符合写入边界。")
+            try:
+                offset = 0
+                while offset < len(body):
+                    remaining = body[offset:]
+                    buffer, count = ctypes.create_string_buffer(remaining), U32()
+                    if not dlls.kernel32.WriteFile(
+                        locked_value(), buffer, len(remaining), ctypes.byref(count), None
+                    ) or not 0 < count.value <= len(remaining):
+                        raise ContextError("storage_unavailable", "原生元数据写入结果不能确认。")
+                    offset += count.value
+                # Empty WriteFile is not truncation. Establish exact EOF explicitly.
+                if not dlls.kernel32.SetEndOfFile(locked_value()):
+                    raise ContextError("storage_unavailable", "原生元数据长度不能确认。")
+                if not dlls.kernel32.FlushFileBuffers(locked_value()):
+                    raise ContextError("storage_unavailable", "原生元数据落盘不能确认。")
+                after = self.information(handle)
+                locked_value()
+                if after.size != len(body):
+                    raise ContextError("storage_unavailable", "原生元数据写后长度不符。")
+                if self.read_file(handle, max_bytes=65_536) != body:
+                    raise ContextError("storage_unavailable", "原生元数据写后内容不符。")
+                locked_value()
+            except BaseException as error:
+                # Do not relinquish the kernel lock or reuse partial write authority.
+                handle._active_lock = None
+                if not isinstance(error, Exception):
+                    raise
+                raise ContextError(
+                    "storage_unavailable",
+                    "元数据写入结果未知；已停止写入，不会自动重试或接管任务。",
+                    next_action="请关闭当前句柄并显式核对所有权元数据。",
+                ) from None
 
     def require_private_security(self, handle: NativeHandle) -> None:
         self._value(handle)
