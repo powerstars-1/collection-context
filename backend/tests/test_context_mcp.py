@@ -53,7 +53,12 @@ def test_original_stdio_roundtrip_readonly_and_business_errors(tmp_path):
         )
         async with stdio_client(parameters) as (reader, writer):
             async with ClientSession(reader, writer) as session:
-                await session.initialize()
+                initialized = await session.initialize()
+                assert isinstance(initialized.instructions, str)
+                assert "关键词 AND" in initialized.instructions
+                assert "最多再改写三次" in initialized.instructions
+                assert "不要自动放宽筛选" in initialized.instructions
+                assert "摘要不能替代原文" in initialized.instructions
                 tools = (await session.list_tools()).tools
                 assert {t.name for t in tools} == {
                     "search_collections",

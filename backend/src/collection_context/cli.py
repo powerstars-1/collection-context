@@ -15,6 +15,7 @@ from typing import Any
 from collection_context.application.agent_addition import AgentAdditionGateway
 from collection_context.application.contracts import ARTIFACT_KINDS, ContextError, envelope
 from collection_context.application.gateway import ReadGateway
+from collection_context.application.query_guidance import QUERY_GUIDANCE
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.browser import BrowserSession
 from collection_context.infrastructure.files import SafeFiles
@@ -105,8 +106,8 @@ def parser() -> argparse.ArgumentParser:
     )
     revoke = commands.add_parser("revoke-access", help="撤销产品访问口令，活动 HTTP 服务即时拒绝其会话")
     revoke.add_argument("--principal", required=True)
-    search = commands.add_parser("search", help="关键词检索已有资料，不同步、不提取")
-    search.add_argument("--query", required=True)
+    search = commands.add_parser("search", help="关键词检索已有资料，不同步、不提取", epilog=QUERY_GUIDANCE)
+    search.add_argument("--query", required=True, help="1～3个关键短词，按 AND 匹配；不直接输入整段问题")
     search.add_argument("--limit", type=int, default=3)
     search.add_argument("--offset", type=int, default=0)
     search.add_argument("--version", help="继续搜索时携带上一页version")
