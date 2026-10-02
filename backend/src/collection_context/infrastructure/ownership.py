@@ -47,12 +47,14 @@ class _FileLease:
     unavailable: str
     label: str
 
-    def __init__(self, root: Path, *, metadata: dict | None = None):
+    def __init__(self, root: Path, *, metadata: dict | None = None, _expected_identity: object | None = None):
         self.files = SafeFiles(root)
         self.fd = -1
         self.nonce = "e_" + uuid.uuid4().hex
         self.body = canonical_bytes({"nonce": self.nonce, "pid": os.getpid(), **(metadata or {})})
         try:
+            if _expected_identity is not None and self.files.identity != _expected_identity:
+                raise ContextError("storage_unavailable", "资料库根身份已变化；没有写入所有权元数据。")
             require_ownership_runtime()
             import fcntl
 
@@ -153,14 +155,19 @@ class WorkerLease(_FileLease):
     label = "后台调度器"
 
     def __init__(
-        self, root: Path, *, allow_model_calls: bool | None = None, allow_source_sync: bool | None = None
+        self,
+        root: Path,
+        *,
+        allow_model_calls: bool | None = None,
+        allow_source_sync: bool | None = None,
+        _expected_identity: object | None = None,
     ):
         metadata = None
         if allow_model_calls is not None or allow_source_sync is not None:
             if type(allow_model_calls) is not bool or type(allow_source_sync) is not bool:
                 raise ContextError("invalid_argument", "后台运行权限必须是明确布尔值。")
             metadata = {"capabilities": {"model_calls": allow_model_calls, "source_sync": allow_source_sync}}
-        super().__init__(root, metadata=metadata)
+        super().__init__(root, metadata=metadata, _expected_identity=_expected_identity)
 
     @classmethod
     def observe(cls, files: SafeFiles) -> dict:

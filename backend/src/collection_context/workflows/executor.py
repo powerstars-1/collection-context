@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from collection_context.application.contracts import ContextError, canonical_bytes, digest, valid_id
-from collection_context.infrastructure.ownership import ExecutorLease
+from collection_context.infrastructure.storage import KernelLease
 from collection_context.library.store import LibraryStore
 from collection_context.workflows.jobs import JobManager
 
@@ -115,7 +115,7 @@ class DurableExecutor:
             principal=principal,
         )
 
-    def _check(self, ref: str, lease: ExecutorLease, principal: str) -> None:
+    def _check(self, ref: str, lease: KernelLease, principal: str) -> None:
         lease.check()
         job = self.jobs.get(ref, principal=principal)
         if job["state"] != "running" or job["cancel_requested"]:
@@ -138,7 +138,7 @@ class DurableExecutor:
                 )
 
     def _stage(
-        self, ref: str, stage: Stage, results: dict[str, dict[str, Any]], lease: ExecutorLease, principal: str
+        self, ref: str, stage: Stage, results: dict[str, dict[str, Any]], lease: KernelLease, principal: str
     ) -> dict[str, Any]:
         self._check(ref, lease, principal)
         dependencies = {name: results[name] for name in stage.dependencies}
@@ -291,7 +291,9 @@ class DurableExecutor:
 
     def run(self, ref: str, stages: list[Stage], *, principal: str = "local_owner") -> dict[str, Any]:
         descriptors = plan(stages)
-        with ExecutorLease(self.store.files.root) as lease:
+        with self.store.storage.executor(
+            self.store.files.root, expected_identity=self.store.files.identity
+        ) as lease:
             job = self.jobs.get(ref, principal=principal)
             if job["payload"].get("plan") != descriptors:
                 raise ContextError("plan_changed", "任务的模型/输入/阶段计划已固定，未改用当前默认值。")

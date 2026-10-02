@@ -32,7 +32,14 @@ class _WindowsFileLease:
     unavailable: str
     label: str
 
-    def __init__(self, root: str, *, _native: WindowsNative | None = None, _metadata: dict | None = None):
+    def __init__(
+        self,
+        root: str,
+        *,
+        _native: WindowsNative | None = None,
+        _metadata: dict | None = None,
+        _expected_identity: object | None = None,
+    ):
         self._mutex = threading.RLock()
         self._parents = ExitStack()
         self._closed = False
@@ -42,6 +49,8 @@ class _WindowsFileLease:
         self.nonce = "e_" + uuid.uuid4().hex
         self.body = canonical_bytes({"nonce": self.nonce, "pid": os.getpid(), **(_metadata or {})})
         try:
+            if _expected_identity is not None and self.files.identity != _expected_identity:
+                raise ContextError("storage_unavailable", "资料库根身份已变化；没有写入所有权元数据。")
             # Keep ancestor handles, but do not retain a thread-owned RLock for
             # the lease lifetime. Check/close may be called by another thread.
             with self.files._lock:
@@ -197,13 +206,14 @@ class WindowsWorkerLease(_WindowsFileLease):
         allow_model_calls: bool | None = None,
         allow_source_sync: bool | None = None,
         _native: WindowsNative | None = None,
+        _expected_identity: object | None = None,
     ):
         metadata = None
         if allow_model_calls is not None or allow_source_sync is not None:
             if type(allow_model_calls) is not bool or type(allow_source_sync) is not bool:
                 raise ContextError("invalid_argument", "后台运行权限必须是明确布尔值。")
             metadata = {"capabilities": {"model_calls": allow_model_calls, "source_sync": allow_source_sync}}
-        super().__init__(root, _native=_native, _metadata=metadata)
+        super().__init__(root, _native=_native, _metadata=metadata, _expected_identity=_expected_identity)
 
     @classmethod
     def observe(cls, files: WindowsFiles) -> dict:

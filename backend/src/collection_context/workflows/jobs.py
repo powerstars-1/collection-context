@@ -16,7 +16,7 @@ from collection_context.application.contracts import (
     utc_now,
     valid_id,
 )
-from collection_context.infrastructure.ownership import ExecutorLease
+from collection_context.infrastructure.storage import KernelLease
 from collection_context.library.store import LibraryStore
 from collection_context.workflows.policy import execution_allowed
 
@@ -141,7 +141,7 @@ class JobManager:
 
         return self.store.transact(change)
 
-    def suspend_source(self, ref: str, *, lease: ExecutorLease) -> dict[str, Any]:
+    def suspend_source(self, ref: str, *, lease: KernelLease) -> dict[str, Any]:
         """Keep a non-paid source checkpoint queued when its registered timer is paused."""
         lease.check()
         if lease.files.root != self.store.files.root or lease.files.identity != self.store.files.identity:
@@ -327,7 +327,7 @@ class JobManager:
         return self.store.transact(change)
 
     def recover_interrupted(
-        self, *, lease: ExecutorLease, principal: str | None = None, job_ids: set[str] | None = None
+        self, *, lease: KernelLease, principal: str | None = None, job_ids: set[str] | None = None
     ) -> list[dict[str, Any]]:
         """Kernel-backed ownership is mandatory; no live-process guessing from a state file."""
         lease.check()

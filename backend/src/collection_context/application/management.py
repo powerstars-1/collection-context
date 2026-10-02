@@ -8,7 +8,6 @@ from collection_context.application.connection_runner import ConnectionRunner
 from collection_context.application.contracts import ContextError, envelope
 from collection_context.application.model_setup import ModelSetup
 from collection_context.application.source_management import SourceManagement
-from collection_context.infrastructure.ownership import WorkerLease
 from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.library.store import LibraryStore
 from collection_context.workflows.addition import AdditionWorkflow
@@ -60,7 +59,7 @@ class ManagementService:
             "total_prepared": len(prepared),
             "next_prepared_offset": offset + 20 if offset + 20 < len(prepared) else None,
             "execution": "separately_authorized_worker",
-            "worker": WorkerLease.observe(self.store.files),
+            "worker": self.store.storage.observe_worker(self.store.files),
         }
 
     @staticmethod

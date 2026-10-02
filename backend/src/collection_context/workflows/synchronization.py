@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest, utc_now, valid_id
-from collection_context.infrastructure.ownership import ExecutorLease
+from collection_context.infrastructure.storage import KernelLease
 from collection_context.library.store import LibraryStore
 from collection_context.sources.browser_source import DouyinBrowserSource
 from collection_context.sources.douyin import source_asset_identity
@@ -177,7 +177,7 @@ class SynchronizationWorkflow:
         self.store.transact(change)
         return self.jobs.get(ref)
 
-    def _paused(self, ref: str, plan: dict, imported: dict, executor: ExecutorLease) -> dict | None:
+    def _paused(self, ref: str, plan: dict, imported: dict, executor: KernelLease) -> dict | None:
         state = self.store.snapshot()
         job = state["jobs"][ref]
         if job["state"] == "running" and not execution_allowed(state, job):
@@ -208,7 +208,9 @@ class SynchronizationWorkflow:
         plan = self.plan(config_id)
         if original["budget"]["max_calls"] != 0 or original["calls"]:
             raise ContextError("invalid_sync_plan", "来源同步不能携带模型调用或计费预算。")
-        with ExecutorLease(self.store.files.root) as executor:
+        with self.store.storage.executor(
+            self.store.files.root, expected_identity=self.store.files.identity
+        ) as executor:
             executor.check()
             self.jobs.start(ref)
             previous = self.jobs.get(ref)["stages"].get("source_sync", {}).get("result") or {}

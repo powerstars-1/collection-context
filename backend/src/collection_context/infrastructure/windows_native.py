@@ -487,11 +487,20 @@ class WindowsNative:
         return current
 
     def open_root_directory(self, path: str) -> NativeHandle:
+        return self._open_drive_directory(path, "directory")
+
+    def open_root_listing(self, path: str) -> NativeHandle:
+        """Separate bounded-listing authority for an explicitly selected root."""
+        return self._open_drive_directory(path, "directory_listing")
+
+    def _open_drive_directory(
+        self, path: str, role: Literal["directory", "directory_listing"]
+    ) -> NativeHandle:
         _root_name(path)  # Validate the caller spelling, do not open DOS aliases.
         target = self._drive_target(path)
         # DOS drive letters are namespace junctions. Resolve the bounded current
         # mapping first; preserve OBJ_DONT_REPARSE for the actual device path.
-        handle = self._open(target + path[2:], None, "directory")
+        handle = self._open(target + path[2:], None, role)
         try:
             if self._drive_target(path) != target:
                 raise ContextError("storage_unavailable", "打开期间盘符映射变化；未继续操作。")

@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest
-from collection_context.infrastructure.ownership import ExecutorLease
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 from collection_context.sources.browser_source import DouyinBrowserSource
@@ -224,7 +223,9 @@ class AdditionWorkflow:
         plan = self.plan(job)
         if self.source_factory is None:
             raise ContextError("source_setup_required", "执行单链接需显式配置本产品独立浏览器。")
-        with ExecutorLease(self.store.files.root) as executor:
+        with self.store.storage.executor(
+            self.store.files.root, expected_identity=self.store.files.identity
+        ) as executor:
             executor.check()
             self.jobs.start(ref, principal=principal)
             try:

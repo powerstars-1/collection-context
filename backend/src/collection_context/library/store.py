@@ -23,8 +23,7 @@ from collection_context.application.contracts import (
     validate_source,
     validate_time,
 )
-from collection_context.infrastructure.files import SafeFiles
-from collection_context.infrastructure.ownership import ExecutorLease, WriterLease
+from collection_context.infrastructure.storage import FileAccess, KernelLease, StorageBackend, storage_backend
 
 WRITER_PROTOCOL = "os_writer_v2"
 LEGACY_GUARD = ".context/写锁.json"
@@ -33,9 +32,16 @@ LEGACY_GUARD = ".context/写锁.json"
 class LibraryStore:
     """Transactions are single-writer; readers observe an entire immutable generation."""
 
-    def __init__(self, root: Path, *, mutation_guard: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        root: Path,
+        *,
+        mutation_guard: Callable[[], None] | None = None,
+        _storage: StorageBackend | None = None,
+    ):
         self._mutation_guard = mutation_guard
-        self.files = SafeFiles(root)
+        self.storage = _storage if _storage is not None else storage_backend()
+        self.files = self.storage.open_files(root)
         try:
             self.workspace_id = valid_id(self._configuration()["workspace_id"])
         except BaseException:
@@ -73,12 +79,9 @@ class LibraryStore:
         self.files.close()
 
     @classmethod
-    def initialize(cls, root: Path) -> LibraryStore:
-        root = root.absolute()
-        if root.is_symlink() or (root.exists() and (not root.is_dir() or any(root.iterdir()))):
-            raise ContextError("workspace_not_empty", "只初始化空目录，不覆盖已有库。")
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with SafeFiles(root) as files:
+    def initialize(cls, root: Path, *, _storage: StorageBackend | None = None) -> LibraryStore:
+        storage = _storage if _storage is not None else storage_backend()
+        with storage.initialize(root, allow_empty=True) as files:
             workspace_id = "w_" + uuid.uuid4().hex
             # Permanent guard keeps old O_EXCL-only binaries from writing concurrently.
             # It is not an indication that the new OS-backed writer is busy.
@@ -125,11 +128,11 @@ class LibraryStore:
                 ".context/索引/CURRENT.json",
                 canonical_bytes({"version": index_version, "sha256": hashlib.sha256(index).hexdigest()}),
             )
-        return cls(root)
+        return cls(root, _storage=storage)
 
     @staticmethod
     def _publish(
-        files: SafeFiles, state: dict[str, Any], *, before_commit: Callable[[], None] | None = None
+        files: FileAccess, state: dict[str, Any], *, before_commit: Callable[[], None] | None = None
     ) -> None:
         version = "c_" + uuid.uuid4().hex
         body = canonical_bytes(state)
@@ -160,8 +163,9 @@ class LibraryStore:
             raise ContextError("corrupt_workspace", "库提交校验失败；请恢复备份，不自动重建内容。") from None
 
     @contextmanager
-    def writer(self) -> Iterator[WriterLease]:
-        with WriterLease(self.files.root) as owner:
+    def writer(self) -> Iterator[KernelLease]:
+        self.files.check_root()
+        with self.storage.writer(self.files.root, expected_identity=self.files.identity) as owner:
             self._check_writer(owner)
             try:
                 yield owner
@@ -169,8 +173,10 @@ class LibraryStore:
                 # No unlink: removing a locked inode permits a second independent owner.
                 self._check_writer(owner)
 
-    def _check_writer(self, owner: WriterLease) -> None:
+    def _check_writer(self, owner: KernelLease) -> None:
         owner.check()
+        if owner.files.root != self.files.root or owner.files.identity != self.files.identity:
+            raise ContextError("storage_unavailable", "写入所有权不属于此资料库根；停止提交。")
         if self._mutation_guard is not None:
             self._mutation_guard()
         if self._configuration().get("writer_protocol") != WRITER_PROTOCOL:
@@ -182,7 +188,10 @@ class LibraryStore:
 
     def upgrade_writer(self) -> dict[str, Any]:
         """Explicit, restartable protocol upgrade; never guesses whether a legacy lock is stale."""
-        with ExecutorLease(self.files.root), WriterLease(self.files.root) as owner:
+        with (
+            self.storage.executor(self.files.root, expected_identity=self.files.identity),
+            self.storage.writer(self.files.root, expected_identity=self.files.identity) as owner,
+        ):
             config = self._configuration()
             protocol = config.get("writer_protocol")
             if protocol == WRITER_PROTOCOL:

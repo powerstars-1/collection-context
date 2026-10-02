@@ -7,14 +7,14 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from collection_context.application.contracts import ContextError, valid_id
-from collection_context.infrastructure.files import SafeFiles
+from collection_context.infrastructure.storage import FileAccess, StorageBackend, storage_backend
 
 SYSTEM_SECRET_MANIFEST = "collection-system-secrets.json"
 
 
 @runtime_checkable
 class CredentialBackend(Protocol):
-    files: SafeFiles
+    files: FileAccess
     storage_kind: str
 
     def put(self, value: str) -> str: ...
@@ -29,8 +29,9 @@ class CredentialBackend(Protocol):
 class FileSecrets:
     storage_kind = "private_service_files_not_encrypted"
 
-    def __init__(self, root: Path):
-        self.files = SafeFiles(root)
+    def __init__(self, root: Path, *, _storage: StorageBackend | None = None):
+        self.storage = _storage if _storage is not None else storage_backend()
+        self.files = self.storage.open_files(root)
         try:
             self._check()
         except BaseException:
@@ -38,12 +39,11 @@ class FileSecrets:
             raise
 
     @classmethod
-    def initialize(cls, root: Path) -> FileSecrets:
-        root = root.absolute()
-        if root.is_symlink() or root.exists():
-            raise ContextError("secret_directory_exists", "只创建新的独立凭据目录，不修改已有目录权限。")
-        root.mkdir(parents=True, mode=0o700)
-        return cls(root)
+    def initialize(cls, root: Path, *, _storage: StorageBackend | None = None) -> FileSecrets:
+        storage = _storage if _storage is not None else storage_backend()
+        with storage.initialize(root, allow_empty=False) as files:
+            files.require_private_root()
+        return cls(root, _storage=storage)
 
     def _check(self) -> None:
         self.files.require_private_root()

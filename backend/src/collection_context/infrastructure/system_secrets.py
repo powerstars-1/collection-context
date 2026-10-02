@@ -13,12 +13,13 @@ import re
 import sys
 import threading
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NoReturn, Protocol
 
 from collection_context.application.contracts import ContextError, canonical_bytes
-from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.secrets import SYSTEM_SECRET_MANIFEST, FileSecrets
+from collection_context.infrastructure.storage import FileAccess, StorageBackend, storage_backend
 
 MANIFEST = SYSTEM_SECRET_MANIFEST
 _HEX = re.compile(r"[0-9a-f]{32}")
@@ -56,7 +57,10 @@ def _backend_or_default(backend: _SystemItems | None) -> _SystemItems:
         raise ContextError("credential_unavailable", _ERRORS["credential_unavailable"]) from None
 
 
-def _private_root(files: SafeFiles) -> None:
+_ItemsFactory = Callable[[Path, str], _SystemItems]
+
+
+def _private_root(files: FileAccess) -> None:
     files.require_private_root()
 
 
@@ -92,9 +96,37 @@ class SystemSecrets:
 
     storage_kind = "macos_keychain"
 
-    def __init__(self, root: Path, *, _backend: _SystemItems | None = None):
-        self._backend = _backend_or_default(_backend)
-        self.files = SafeFiles(root)
+    @classmethod
+    def _configuration(
+        cls,
+        storage: StorageBackend | None,
+        backend: _SystemItems | None,
+        factory: _ItemsFactory | None,
+    ) -> tuple[StorageBackend, _ItemsFactory | None]:
+        if backend is not None and factory is not None:
+            raise ContextError("invalid_argument", "凭据测试后端只能明确选择一种。")
+        if backend is None and factory is None:
+            if sys.platform != "darwin":
+                raise ContextError("system_secret_unsupported", _ERRORS["system_secret_unsupported"])
+
+            def default_items(root: Path, namespace: str) -> _SystemItems:
+                return _backend_or_default(None)
+
+            factory = default_items
+        return storage if storage is not None else storage_backend(), factory
+
+    def __init__(
+        self,
+        root: Path,
+        *,
+        _backend: _SystemItems | None = None,
+        _storage: StorageBackend | None = None,
+        _items_factory: _ItemsFactory | None = None,
+    ):
+        self.storage, factory = self._configuration(_storage, _backend, _items_factory)
+        self.files = self.storage.open_files(root)
+        self._backend: _SystemItems | None = None
+        self._owns_backend = _backend is None
         self._lock = threading.RLock()
         self._new: set[str] = set()
         self._closed = False
@@ -105,41 +137,72 @@ class SystemSecrets:
                 set(manifest) != {"schema_version", "backend", "namespace"}
                 or type(manifest["schema_version"]) is not int
                 or manifest["schema_version"] != 1
-                or manifest["backend"] != "macos_keychain"
+                or manifest["backend"] != self.storage_kind
                 or not isinstance(manifest["namespace"], str)
                 or not _HEX.fullmatch(manifest["namespace"])
             ):
                 raise ValueError
             self._manifest = manifest
             self._service = "org.collection-context.credentials." + manifest["namespace"]
+            # No system item service is constructed until this exact private
+            # root and its fixed backend/namespace identity have been validated.
+            try:
+                if _backend is not None:
+                    self._backend = _backend
+                elif factory is not None:
+                    self._backend = factory(self.files.root, manifest["namespace"])
+                else:
+                    raise ValueError
+                if not all(
+                    callable(getattr(self._backend, name, None)) for name in ("create", "read", "delete")
+                ):
+                    raise ValueError
+                self._check()
+            except BaseException as error:
+                raise self._system_error(error, mutation=False) from None
         except (ValueError, TypeError, KeyError):
-            self.files.close()
+            self._cleanup_failed_construction()
             raise ContextError(
                 "system_secret_directory_invalid", "目录不是已确认的系统凭据目录；不会迁移旧密钥。"
             ) from None
         except BaseException:
-            self.files.close()
+            self._cleanup_failed_construction()
             raise
 
     @classmethod
-    def initialize(cls, root: Path, *, _backend: _SystemItems | None = None) -> SystemSecrets:
-        backend = _backend_or_default(_backend)
-        root = root.absolute()
-        if root.is_symlink() or root.exists():
-            raise ContextError("secret_directory_exists", "只创建新的独立系统凭据目录；不迁移已有目录。")
-        try:
-            root.mkdir(parents=True, mode=0o700)
-        except OSError:
-            raise ContextError("storage_unavailable", "系统凭据目录未能建立；未访问系统凭据。") from None
-        with SafeFiles(root) as files:
+    def initialize(
+        cls,
+        root: Path,
+        *,
+        _backend: _SystemItems | None = None,
+        _storage: StorageBackend | None = None,
+        _items_factory: _ItemsFactory | None = None,
+    ) -> SystemSecrets:
+        storage, factory = cls._configuration(_storage, _backend, _items_factory)
+        with storage.initialize(root, allow_empty=False) as files:
             _private_root(files)
             files.write(
                 MANIFEST,
                 canonical_bytes(
-                    {"schema_version": 1, "backend": "macos_keychain", "namespace": uuid.uuid4().hex}
+                    {"schema_version": 1, "backend": cls.storage_kind, "namespace": uuid.uuid4().hex}
                 ),
             )
-        return cls(root, _backend=backend)
+            root = files.root
+        return cls(root, _backend=_backend, _storage=storage, _items_factory=factory)
+
+    def _close_owned_items(self) -> None:
+        if self._owns_backend and self._backend is not None:
+            close = getattr(self._backend, "close", None)
+            if callable(close):
+                close()
+
+    def _cleanup_failed_construction(self) -> None:
+        self._closed = True
+        for close in (self._close_owned_items, self.files.close):
+            try:
+                close()
+            except BaseException:
+                pass  # Preserve the already-sanitized original failure; no retry.
 
     def _load(self, name: str, *, directory: bool = False) -> dict[str, Any]:
         try:
@@ -201,6 +264,7 @@ class SystemSecrets:
             value = FileSecrets._key(value)
             ref = "k_" + uuid.uuid4().hex
             try:
+                assert self._backend is not None
                 self._backend.create(self._service, ref, value)
             except BaseException as error:
                 raise self._system_error(error, mutation=True) from None
@@ -223,6 +287,7 @@ class SystemSecrets:
             # A reference used for retrieval is no longer an un-delivered save.
             self._new.discard(ref)
             try:
+                assert self._backend is not None
                 value = self._backend.read(self._service, ref)
             except BaseException as error:
                 raise self._system_error(error, mutation=False) from None
@@ -243,6 +308,7 @@ class SystemSecrets:
             # returns an ambiguous result. Never retry a potentially finished delete.
             self._new.remove(ref)
             try:
+                assert self._backend is not None
                 self._backend.delete(self._service, ref)
             except BaseException as error:
                 raise self._system_error(error, mutation=True) from None
@@ -255,9 +321,18 @@ class SystemSecrets:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
             self._new.clear()
-            self.files.close()
+            failed = False
+            for close in (self._close_owned_items, self.files.close):
+                try:
+                    close()
+                except BaseException:
+                    failed = True
+            if failed:
+                raise ContextError("credential_unavailable", _ERRORS["credential_unavailable"]) from None
 
     def __repr__(self) -> str:
-        return "SystemSecrets(macos_keychain; no credential values)"
+        return f"SystemSecrets({self.storage_kind}; no credential values)"

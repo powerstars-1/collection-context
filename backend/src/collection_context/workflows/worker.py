@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.ownership import ExecutorLease, WorkerLease
+from collection_context.infrastructure.storage import KernelLease
 from collection_context.workflows.addition import AdditionWorkflow
 from collection_context.workflows.extraction import ExtractionWorkflow
 from collection_context.workflows.policy import execution_allowed
@@ -67,7 +67,7 @@ class BackgroundWorker:
 
     def _drain(
         self,
-        lease: WorkerLease,
+        lease: KernelLease,
         stop: threading.Event,
         limit: int,
         emit: Callable[[dict[str, Any]], None],
@@ -75,7 +75,9 @@ class BackgroundWorker:
         allow_source_sync: bool,
     ) -> dict[str, Any]:
         lease.check()
-        with ExecutorLease(self.store.files.root) as executor:
+        with self.store.storage.executor(
+            self.store.files.root, expected_identity=self.store.files.identity
+        ) as executor:
             snapshot = self.store.snapshot()
             interrupted = any(
                 job["state"] == "running" and job["principal"] == "local_owner"
@@ -197,8 +199,11 @@ class BackgroundWorker:
         stop = stop if stop is not None else threading.Event()
         emit = emit if emit is not None else lambda _: None
         total = 0
-        with WorkerLease(
-            self.store.files.root, allow_model_calls=allow_model_calls, allow_source_sync=allow_source_sync
+        with self.store.storage.worker(
+            self.store.files.root,
+            model_calls=allow_model_calls,
+            source_sync=allow_source_sync,
+            expected_identity=self.store.files.identity,
         ) as lease:
             emit(
                 {

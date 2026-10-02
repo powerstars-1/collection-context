@@ -22,7 +22,6 @@ from collection_context.application.contracts import (
     valid_id,
 )
 from collection_context.infrastructure.files import SafeFiles
-from collection_context.infrastructure.ownership import ExecutorLease
 from collection_context.library.index import FileIndex, accepted_entry, source_refs
 from collection_context.library.legacy_references import validate_legacy_references
 from collection_context.library.store import LEGACY_GUARD, WRITER_PROTOCOL, LibraryStore
@@ -241,7 +240,10 @@ def create_backup(store: LibraryStore, output: Path, *, media_scope: str) -> dic
     try:
         # Match execution's lease order. Auto switches cannot revoke an already-sent request;
         # this live kernel lease blocks backup until the actual executor releases ownership.
-        with ExecutorLease(store.files.root) as executor, store.writer():
+        with (
+            store.storage.executor(store.files.root, expected_identity=store.files.identity) as executor,
+            store.writer(),
+        ):
             state = store.snapshot()
             if state["settings"].get("auto_sync") is True or state["settings"].get("auto_process") is True:
                 raise ContextError("backup_requires_pause", "请先关闭自动同步和自动处理，再创建一致备份。")

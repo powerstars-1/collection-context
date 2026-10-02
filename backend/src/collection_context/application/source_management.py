@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.ownership import WorkerLease
 from collection_context.library.store import LibraryStore
 from collection_context.workflows.connection import ConnectionCatalog
 from collection_context.workflows.source_schedule import SourceSchedule
@@ -70,7 +69,7 @@ class SourceManagement:
                     "timer_matches_current": timer is None or timer["config_id"] == config_id,
                 }
             )
-        worker = WorkerLease.observe(self.store.files)
+        worker = self.store.storage.observe_worker(self.store.files)
         return {
             "scopes": scopes,
             "total_scopes": len(current),

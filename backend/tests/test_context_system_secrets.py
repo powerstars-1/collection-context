@@ -180,6 +180,116 @@ def test_default_mac_constructor_selects_sdk_but_never_queries(tmp_path, monkeyp
     assert not items.calls
 
 
+def test_owned_factory_runs_after_identity_validation_and_closes_once(tmp_path):
+    class Owned(Items):
+        closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    items, calls = Owned(), []
+
+    def factory(root, namespace):
+        manifest = json.loads((root / MANIFEST).read_bytes())
+        assert manifest["namespace"] == namespace and manifest["backend"] == "macos_keychain"
+        calls.append((root, namespace))
+        assert not items.calls
+        return items
+
+    backend = SystemSecrets.initialize(tmp_path / "owned", _items_factory=factory)
+    assert len(calls) == 1 and not items.calls
+    backend.close()
+    backend.close()
+    assert items.closed == 1
+
+
+def test_borrowed_backend_is_not_closed(tmp_path):
+    class Borrowed(Items):
+        def close(self):
+            pytest.fail("Borrowed items must not be closed")
+
+    backend = SystemSecrets.initialize(tmp_path / "borrowed", _backend=Borrowed())
+    backend.close()
+
+
+def test_invalid_manifest_does_not_instantiate_owned_factory(setup):
+    backend, _ = setup
+    backend.files.write(MANIFEST, canonical_bytes({"schema_version": 1}), replace=True)
+
+    def forbidden(root, namespace):
+        pytest.fail("Invalid identity cannot bind an item service")
+
+    with pytest.raises(ContextError):
+        SystemSecrets(backend.files.root, _items_factory=forbidden)
+
+
+def test_owned_factory_failure_is_sanitized_and_preserves_initialized_root(tmp_path):
+    def fail(root, namespace):
+        raise RuntimeError(PRIVATE)
+
+    root = tmp_path / "owned-failure"
+    with pytest.raises(ContextError) as caught:
+        SystemSecrets.initialize(root, _items_factory=fail)
+    assert caught.value.code == "credential_unavailable"
+    no_private(caught.value)
+    assert [path.name for path in root.iterdir()] == [MANIFEST]
+
+
+def test_owned_items_closed_if_manifest_changes_during_factory(tmp_path):
+    class Owned(Items):
+        closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    items = Owned()
+
+    def factory(root, namespace):
+        from collection_context.infrastructure.files import SafeFiles
+
+        with SafeFiles(root) as files:
+            files.write(MANIFEST, canonical_bytes({"schema_version": 1}), replace=True)
+        return items
+
+    with pytest.raises(ContextError) as caught:
+        SystemSecrets.initialize(tmp_path / "changed", _items_factory=factory)
+    assert caught.value.code == "credential_unavailable" and items.closed == 1 and not items.calls
+
+
+def test_owned_close_failure_still_closes_files_once_and_does_not_echo(tmp_path, monkeypatch):
+    class Owned(Items):
+        closed = 0
+
+        def close(self):
+            self.closed += 1
+            raise RuntimeError(PRIVATE)
+
+    items, closed = Owned(), []
+    backend = SystemSecrets.initialize(
+        tmp_path / "failed-close", _items_factory=lambda root, namespace: items
+    )
+    original = backend.files.close
+
+    def close_files():
+        closed.append(True)
+        original()
+
+    monkeypatch.setattr(backend.files, "close", close_files)
+    with pytest.raises(ContextError) as caught:
+        backend.close()
+    no_private(caught.value)
+    assert caught.value.code == "credential_unavailable"
+    backend.close()
+    assert items.closed == 1 and closed == [True]
+
+
+def test_invalid_factory_result_cannot_claim_initialization_success(tmp_path):
+    with pytest.raises(ContextError) as caught:
+        SystemSecrets.initialize(tmp_path / "invalid-factory", _items_factory=lambda root, namespace: None)
+    assert caught.value.code == "credential_unavailable"
+    assert [path.name for path in (tmp_path / "invalid-factory").iterdir()] == [MANIFEST]
+
+
 @pytest.mark.parametrize("kind", ["file-secrets", "unknown"])
 def test_existing_old_or_unknown_directories_are_not_imported_or_migrated(tmp_path, kind):
     root, items = tmp_path / "existing", Items()
