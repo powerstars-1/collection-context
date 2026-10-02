@@ -151,6 +151,23 @@ class WindowsFiles:
                 self.check_root()
                 return before.size
 
+    def list_directory(self, relative: str, *, max_entries: int = 10_000) -> list[dict[str, str]]:
+        """Observe one anchored directory; do not read bodies or follow reparse points."""
+        if type(max_entries) is not int or not 1 <= max_entries <= 100_000:
+            raise ContextError("invalid_argument", "目录条目上限须为1至100000的整数。")
+        with self._parent(relative) as (parent, component):
+            with self.native.open_relative(parent, component, role="directory_listing") as handle:
+                before = self.native.information(handle)
+                result = self.native.list_directory(handle, max_entries=max_entries)
+                self.check_root()
+                with self.native.open_relative(parent, component, role="directory") as current:
+                    if current.identity != before.identity:
+                        raise ContextError("version_changed", "枚举期间目录路径身份变化。")
+                if self.native.information(handle) != before:
+                    raise ContextError("version_changed", "目录在枚举期间发生变化。")
+                self.check_root()
+                return result
+
     def read(self, relative: str, *, max_bytes: int = MAX_NATIVE_READ, private: bool = False) -> bytes:
         # Reject before opening a directory or creating any object.
         if type(max_bytes) is not int or not 0 <= max_bytes <= (1 << 63) - 2 or type(private) is not bool:

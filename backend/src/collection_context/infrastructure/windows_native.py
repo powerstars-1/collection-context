@@ -13,6 +13,9 @@ Native contracts (original implementation; no copied external implementation):
 https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
 https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes
 https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getfileinformationbyhandleex
+https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_extd_dir_info
+https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ne-minwinbase-file_info_by_handle_class
+https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/36172f0b-8dce-435a-8748-859978d632f8
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
 https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
 https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-readfile
@@ -106,6 +109,26 @@ class FileAttributeTagInfo(ctypes.Structure):
     _fields_ = [("FileAttributes", U32), ("ReparseTag", U32)]
 
 
+class FileIdExtdDirectoryHeader(ctypes.Structure):
+    """Fixed prefix only; FileName follows at byte 88 without a terminator."""
+
+    _fields_ = [
+        ("NextEntryOffset", U32),
+        ("FileIndex", U32),
+        ("CreationTime", I64),
+        ("LastAccessTime", I64),
+        ("LastWriteTime", I64),
+        ("ChangeTime", I64),
+        ("EndOfFile", I64),
+        ("AllocationSize", I64),
+        ("FileAttributes", U32),
+        ("FileNameLength", U32),
+        ("EaSize", U32),
+        ("ReparsePointTag", U32),
+        ("FileId", ctypes.c_ubyte * 16),
+    ]
+
+
 class _Offsets(ctypes.Structure):
     _fields_ = [("Offset", U32), ("OffsetHigh", U32)]
 
@@ -119,11 +142,20 @@ class Overlapped(ctypes.Structure):
 
 
 Role = Literal[
-    "directory", "read_file", "lease_file", "lease_observer", "publication_file", "metadata", "delete_file"
+    "directory",
+    "directory_listing",
+    "read_file",
+    "lease_file",
+    "lease_observer",
+    "publication_file",
+    "metadata",
+    "delete_file",
 ]
 # Publication handles can only originate in exclusive private creation. They
 # cannot be requested by open_relative for an arbitrary existing file.
-_ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer", "metadata", "delete_file"})
+_ROLES = frozenset(
+    {"directory", "directory_listing", "read_file", "lease_file", "lease_observer", "metadata", "delete_file"}
+)
 _OBJ_CASE_INSENSITIVE = 0x40
 _OBJ_DONT_REPARSE = 0x1000
 _FILE_OPEN_REPARSE_POINT = 0x00200000
@@ -140,6 +172,7 @@ _INVALID_HANDLE = (1 << 64) - 1
 LEASE_LOCK_OFFSET = 1 << 20
 MAX_NATIVE_READ = 16_000_000
 _READ_CHUNK = 65_536
+_DIRECTORY_BUFFER = 65_536
 _RESERVED = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "CLOCK$"} | {
     prefix + digit for prefix in ("COM", "LPT") for digit in "123456789¹²³"
 }
@@ -226,6 +259,7 @@ def _check_layout() -> None:
         FileStandardInfo: 24,
         FileBasicInfo: 40,
         FileAttributeTagInfo: 8,
+        FileIdExtdDirectoryHeader: 88,
         Overlapped: 32,
     }
     offsets = (
@@ -239,6 +273,9 @@ def _check_layout() -> None:
         FileIdInfo.FileId.offset == 8,
         FileStandardInfo.NumberOfLinks.offset == 16,
         FileBasicInfo.FileAttributes.offset == 32,
+        FileIdExtdDirectoryHeader.FileAttributes.offset == 56,
+        FileIdExtdDirectoryHeader.FileNameLength.offset == 60,
+        FileIdExtdDirectoryHeader.FileId.offset == 72,
         Overlapped.Position.offset == 16,
         Overlapped.hEvent.offset == 24,
     )
@@ -518,7 +555,11 @@ class WindowsNative:
     def open_relative(self, parent: NativeHandle, component: str, *, role: Role) -> NativeHandle:
         validate_component(component)
         self._value(parent)
-        if parent.role != "directory" or not isinstance(role, str) or role not in _ROLES:
+        if (
+            parent.role not in {"directory", "directory_listing"}
+            or not isinstance(role, str)
+            or role not in _ROLES
+        ):
             raise ContextError("forbidden_path", "目录句柄或固定访问角色不匹配。")
         self.information(parent)
         return self._open(component, parent, role)
@@ -543,7 +584,9 @@ class WindowsNative:
         )
         access = _SYNCHRONIZE | _READ_CONTROL | _FILE_READ_ATTRIBUTES
         if role not in {"metadata", "delete_file"}:
-            access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
+            access |= 0x20 if role in {"directory", "directory_listing"} else 0x1  # TRAVERSE / READ_DATA
+        if role == "directory_listing":
+            access |= 0x1  # FILE_LIST_DIRECTORY; ordinary traversal handles keep their existing rights.
         if role in {"lease_file", "publication_file"}:
             # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
             # WRITE_DATA. Neither role requests WRITE_DAC; lease has no DELETE.
@@ -562,6 +605,7 @@ class WindowsNative:
             raise ContextError("forbidden_path", "创建权限与固定文件角色不匹配。")
         shares = {
             "directory": 3,
+            "directory_listing": 3,
             "read_file": 1,
             "lease_file": 3,
             "lease_observer": 3,
@@ -571,7 +615,11 @@ class WindowsNative:
         }[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT
         if role != "metadata":
-            options |= _FILE_DIRECTORY_FILE if role == "directory" else _FILE_NON_DIRECTORY_FILE
+            options |= (
+                _FILE_DIRECTORY_FILE
+                if role in {"directory", "directory_listing"}
+                else _FILE_NON_DIRECTORY_FILE
+            )
         output, io = HANDLE(), IoStatusBlock()
         status = dlls.ntdll.NtCreateFile(
             ctypes.byref(output),
@@ -630,7 +678,9 @@ class WindowsNative:
         if (
             (tags.FileAttributes | basic.FileAttributes) & _FILE_ATTRIBUTE_REPARSE_POINT
             or tags.ReparseTag
-            or (handle.role != "metadata" and directory != (handle.role == "directory"))
+            or (
+                handle.role != "metadata" and directory != (handle.role in {"directory", "directory_listing"})
+            )
             or standard.DeletePending
             or standard.EndOfFile < 0
             or standard.AllocationSize < 0
@@ -654,6 +704,107 @@ class WindowsNative:
         if handle._identity is not None and result.identity != handle._identity:
             raise ContextError("lock_changed", "原生文件句柄身份发生变化。")
         return result
+
+    def list_directory(self, handle: NativeHandle, *, max_entries: int = 10_000) -> list[dict[str, str]]:
+        """Bounded enumeration through an owned listing HANDLE, with no path fallback.
+
+        The OS cursor belongs to this handle and is serialized through its IO
+        lock. A fixed aligned buffer is restarted once and then continued until
+        ERROR_NO_MORE_FILES. Errors never return a truncated success. This is a
+        checked observation, not an atomic directory snapshot or an IO deadline.
+        """
+        if type(max_entries) is not int or not 1 <= max_entries <= 100_000:
+            raise ContextError("invalid_argument", "目录条目上限须为1至100000的整数。")
+        self._value(handle)
+        if handle.role != "directory_listing":
+            raise ContextError("forbidden_path", "目录枚举需要专用只读枚举句柄。")
+        with handle._io_lock:
+            before = self.information(handle)
+            dlls = self._libraries()
+            restart = True
+            seen: set[str] = set()
+            result: list[dict[str, str]] = []
+            while True:
+                # U64 allocation establishes the required 8-byte alignment.
+                buffer = (U64 * (_DIRECTORY_BUFFER // 8))()
+                if not dlls.kernel32.GetFileInformationByHandleEx(
+                    HANDLE(self._value(handle)), 20 if restart else 19, buffer, ctypes.sizeof(buffer)
+                ):
+                    error = dlls.last_error()
+                    if error == 18:  # ERROR_NO_MORE_FILES, never generic EOF or another failure.
+                        break
+                    if error in {1, 50, 87}:  # Unsupported class/driver: no different enumeration API.
+                        raise _unsupported()
+                    raise ContextError("storage_unavailable", "目录枚举失败；未返回部分条目。")
+                restart = False
+                body, offset = bytes(buffer), 0
+                while True:
+                    size = ctypes.sizeof(FileIdExtdDirectoryHeader)
+                    if offset + size > len(body):
+                        raise ContextError("storage_unavailable", "目录枚举记录边界无效。")
+                    record = FileIdExtdDirectoryHeader.from_buffer_copy(body, offset)
+                    length, following = int(record.FileNameLength), int(record.NextEntryOffset)
+                    end = offset + size + length
+                    if (
+                        length < 2
+                        or length % 2
+                        or length > 510
+                        or end > len(body)
+                        or following
+                        and (
+                            following % 8
+                            or following < size + length
+                            or offset + following + size > len(body)
+                        )
+                    ):
+                        raise ContextError("storage_unavailable", "目录枚举名称或后续记录边界无效。")
+                    try:
+                        name = body[offset + size : end].decode("utf-16-le", errors="strict")
+                    except UnicodeError:
+                        raise ContextError("storage_unavailable", "目录枚举名称不是有效UTF-16。") from None
+                    if name in seen:
+                        raise ContextError("version_changed", "目录枚举返回重复条目；未合并不稳定结果。")
+                    seen.add(name)
+                    if name not in {".", ".."}:
+                        if len(result) >= max_entries:
+                            raise ContextError("scan_limit", "目录条目超过本次上限；未返回部分列表。")
+                        kind = "unsafe"
+                        try:
+                            validate_component(name)
+                        except ContextError:
+                            pass  # An ambiguous native spelling is reported but never opened.
+                        else:
+                            # FILE_ID_EXTD_DIR_INFO.ReparsePointTag is undefined
+                            # unless FileAttributes has REPARSE_POINT. Ignore
+                            # garbage in that field for ordinary entries; the
+                            # relative metadata handle still checks real tags.
+                            if not record.FileAttributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+                                if not any(record.FileId):
+                                    raise _unsupported()  # Do not identify a file by an unchecked name.
+                                try:
+                                    with self.open_relative(handle, name, role="metadata") as entry:
+                                        info = self.information(entry)
+                                        if (
+                                            info.identity.volume_serial != before.identity.volume_serial
+                                            or info.identity.file_id != bytes(record.FileId)
+                                            or info.directory != bool(record.FileAttributes & 0x10)
+                                        ):
+                                            raise ContextError("version_changed", "枚举条目身份已改变。")
+                                        kind = "directory" if info.directory else "file"
+                                except ContextError as error:
+                                    if error.code == "not_found":
+                                        raise ContextError("version_changed", "枚举条目已消失。") from None
+                                    if error.code != "forbidden_path":
+                                        raise
+                        result.append({"name": name, "kind": kind})
+                    if not following:
+                        break
+                    offset += following
+                if self.information(handle) != before:
+                    raise ContextError("version_changed", "目录在枚举期间发生变化。")
+            if self.information(handle) != before:
+                raise ContextError("version_changed", "目录在枚举期间发生变化。")
+            return sorted(result, key=lambda entry: entry["name"])
 
     def read_file(
         self, handle: NativeHandle, *, max_bytes: int = MAX_NATIVE_READ, private: bool = False
