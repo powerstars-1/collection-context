@@ -5,9 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import os
 import shutil
-import stat
 import zipfile
 from collections.abc import Callable
 from typing import Any
@@ -88,20 +86,9 @@ class LibraryManagement:
         return list({blob["path"]: blob for blob in blobs}.values())
 
     def _size(self, path: str) -> int:
-        # Metadata only, descriptor-anchored; never load whole videos to count storage.
-        parent, name = self.store.files._parent(path)
-        try:
-            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-                raise ContextError("forbidden_path", "计量只允许非链接普通文件。")
-            self.store.files.check_root()
-            return info.st_size
-        except FileNotFoundError:
-            raise ContextError("not_found", "计量文件缺失。") from None
-        except OSError:
-            raise ContextError("storage_unavailable", "无法安全计量资料。") from None
-        finally:
-            os.close(parent)
+        # Same backend contract on each platform; no POSIX descriptor access or
+        # whole-video reads in this application consumer.
+        return self.store.files.file_size(path)
 
     @staticmethod
     def _artifact_path(item: dict[str, Any], kind: str) -> str:

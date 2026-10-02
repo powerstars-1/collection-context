@@ -116,10 +116,10 @@ class Overlapped(ctypes.Structure):
     _fields_ = [("Internal", U64), ("InternalHigh", U64), ("Position", _OffsetUnion), ("hEvent", HANDLE)]
 
 
-Role = Literal["directory", "read_file", "lease_file", "lease_observer", "publication_file"]
+Role = Literal["directory", "read_file", "lease_file", "lease_observer", "publication_file", "metadata"]
 # Publication handles can only originate in exclusive private creation. They
 # cannot be requested by open_relative for an arbitrary existing file.
-_ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer"})
+_ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer", "metadata"})
 _OBJ_CASE_INSENSITIVE = 0x40
 _OBJ_DONT_REPARSE = 0x1000
 _FILE_OPEN_REPARSE_POINT = 0x00200000
@@ -538,7 +538,8 @@ class WindowsNative:
             None,
         )
         access = _SYNCHRONIZE | _READ_CONTROL | _FILE_READ_ATTRIBUTES
-        access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
+        if role != "metadata":
+            access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
         if role in {"lease_file", "publication_file"}:
             # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
             # WRITE_DATA. Neither role requests WRITE_DAC; lease has no DELETE.
@@ -559,9 +560,11 @@ class WindowsNative:
             "lease_file": 3,
             "lease_observer": 3,
             "publication_file": 0,
+            "metadata": 3,
         }[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT
-        options |= _FILE_DIRECTORY_FILE if role == "directory" else _FILE_NON_DIRECTORY_FILE
+        if role != "metadata":
+            options |= _FILE_DIRECTORY_FILE if role == "directory" else _FILE_NON_DIRECTORY_FILE
         output, io = HANDLE(), IoStatusBlock()
         status = dlls.ntdll.NtCreateFile(
             ctypes.byref(output),
@@ -620,7 +623,7 @@ class WindowsNative:
         if (
             (tags.FileAttributes | basic.FileAttributes) & _FILE_ATTRIBUTE_REPARSE_POINT
             or tags.ReparseTag
-            or directory != (handle.role == "directory")
+            or (handle.role != "metadata" and directory != (handle.role == "directory"))
             or standard.DeletePending
             or standard.EndOfFile < 0
             or standard.AllocationSize < 0

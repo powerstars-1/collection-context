@@ -74,7 +74,7 @@ def test_missing_read_does_not_create_directories_or_stage(files):
 @pytest.mark.parametrize(
     "relative", ["", "/a", "a/", "a//b", "a/../b", "a/CON", "a\\b", "x:stream", "a/xx.", None]
 )
-@pytest.mark.parametrize("operation", ["read", "write", "mkdir"])
+@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "entry_exists", "file_size"])
 def test_invalid_paths_have_no_native_side_effects(files, relative, operation):
     dlls, tree = files
     before = len(dlls.opened)
@@ -385,3 +385,108 @@ def test_malformed_utf16_device_mapping_never_reaches_ntcreatefile():
     dlls.kernel32.QueryDosDeviceW = FakeFunction(malformed)
     assert code(lambda: dlls.native.open_root_directory("C:\\库")) == "storage_unavailable"
     assert not dlls.opened
+
+
+def test_metadata_presence_and_size_do_not_read_body_or_request_body_rights(files):
+    dlls, tree = files
+    tree.write("资料/正文", b"original bytes")
+    reads = len(dlls.reads)
+    assert tree.entry_exists("资料") is True
+    assert tree.entry_exists("资料/正文") is True
+    assert tree.file_size("资料/正文") == len(b"original bytes")
+    assert len(dlls.reads) == reads
+    probes = [entry for entry in dlls.opened if entry["access"] == 0x00120080]
+    assert probes and all(entry["shares"] == 3 and entry["options"] == 0x00200020 for entry in probes)
+    with tree._parent("资料/正文") as (parent, component):
+        with dlls.native.open_relative(parent, component, role="metadata") as handle:
+            assert code(lambda: dlls.native.read_file(handle)) == "forbidden_path"
+            assert code(lambda: dlls.native.try_lock(handle, exclusive=False)) == "forbidden_path"
+
+
+def test_metadata_missing_does_not_create_or_request_write(files):
+    dlls, tree = files
+    assert tree.entry_exists("missing") is False
+    assert tree.entry_exists("missing/child") is False
+    assert code(lambda: tree.file_size("missing")) == "not_found"
+    assert not dlls.reads and not dlls.writes and not dlls.renames
+    assert not any(entry["disposition"] == 2 for entry in dlls.opened)
+
+
+@pytest.mark.parametrize("change", ["directory", "reparse", "hardlink"])
+def test_metadata_size_rejects_nonregular_or_unsafe_entries(files, change):
+    dlls, tree = files
+    tree.write("entry", b"original")
+    key = dlls.name_key(tree.handle._value, "entry")
+    if change == "directory":
+        dlls.names[key]["directory"] = True
+        assert tree.entry_exists("entry") is True
+    elif change == "reparse":
+        dlls.names[key]["tag"] = 0xA000000C
+    else:
+        dlls.names[key]["links"] = 2
+    assert code(lambda: tree.file_size("entry")) == "forbidden_path"
+    if change != "directory":
+        assert code(lambda: tree.entry_exists("entry")) == "forbidden_path"
+
+
+@pytest.mark.parametrize("method", ["entry_exists", "file_size"])
+def test_metadata_root_change_is_not_false_or_stale_size(files, method):
+    dlls, tree = files
+    tree.write("entry", b"original")
+
+    def detach(value, name, disposition):
+        if name == "entry" and disposition == 1:
+            dlls.device_target = "\\Device\\HarddiskVolume87"
+
+    dlls.open_hook = detach
+    assert code(lambda: getattr(tree, method)("entry")) == "storage_unavailable"
+
+
+def test_metadata_existing_windows_facade_supports_credential_consumer_without_fd(files):
+    from collection_context.infrastructure.secrets import SYSTEM_SECRET_MANIFEST, FileSecrets
+
+    _, tree = files
+    backend = object.__new__(FileSecrets)
+    backend.files = tree
+    backend._check()
+    tree.mkdir(SYSTEM_SECRET_MANIFEST)
+    assert code(backend._check) == "credential_backend_mismatch"
+
+
+def test_metadata_windows_facade_supports_library_size_consumer_without_fd(files):
+    from collection_context.application.library_management import LibraryManagement
+
+    _, tree = files
+    tree.write("媒体/原创", b"original fixture")
+    service = LibraryManagement(SimpleNamespace(files=tree), authorize=lambda: None)
+    assert service._size("媒体/原创") == len(b"original fixture")
+
+
+@pytest.mark.parametrize("change", ["size", "timestamp", "directory", "hardlink"])
+def test_metadata_windows_size_change_never_returns_old_size(files, monkeypatch, change):
+    dlls, tree = files
+    tree.write("entry", b"original")
+    original = dlls.native.information
+    calls = 0
+
+    def changing(handle):
+        nonlocal calls
+        result = original(handle)
+        if handle.role == "metadata":
+            calls += 1
+            if calls == 2:  # Open validation first, then the facade's size snapshot.
+                data = dlls.files[handle._value]
+                if change == "size":
+                    data["size"] += 1
+                elif change == "timestamp":
+                    data["last_write_time"] = 99
+                elif change == "directory":
+                    data["directory"] = True
+                else:
+                    data["links"] = 2
+        return result
+
+    monkeypatch.setattr(dlls.native, "information", changing)
+    assert code(lambda: tree.file_size("entry")) == (
+        "forbidden_path" if change == "hardlink" else "version_changed"
+    )

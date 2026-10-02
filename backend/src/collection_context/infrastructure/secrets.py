@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -52,17 +51,16 @@ class FileSecrets:
             # Presence alone (including a broken link or damaged manifest) means
             # this cannot be a legacy plaintext backend. Never parse metadata as
             # an API key or fall back after a system-directory identity failure.
-            os.stat(SYSTEM_SECRET_MANIFEST, dir_fd=self.files.fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        except OSError:
+            exists = self.files.entry_exists(SYSTEM_SECRET_MANIFEST)
+        except ContextError:
             raise ContextError(
                 "credential_backend_mismatch", "凭据目录后端身份无法确认；未读取密钥。"
             ) from None
-        else:
+        if exists:
             raise ContextError(
                 "credential_backend_mismatch", "系统凭据目录不能作为普通文件凭据打开；未读取密钥。"
             )
+        self.files.require_private_root()
 
     @staticmethod
     def _ref(ref: str) -> str:

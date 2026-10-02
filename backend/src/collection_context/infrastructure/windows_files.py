@@ -118,6 +118,36 @@ class WindowsFiles:
                 parent = stack.enter_context(self._child(parent, component, create=True))
             self.check_root()
 
+    def entry_exists(self, relative: str) -> bool:
+        """Only confirmed absence returns false; unsafe objects/parents fail.
+
+        Metadata handles can represent a file or directory but have no body,
+        write, delete or lock authority. Reparse/linked objects are not followed
+        or silently interpreted as absent. No directory/file is created.
+        """
+        try:
+            with self._parent(relative) as (parent, component):
+                with self.native.open_relative(parent, component, role="metadata"):
+                    self.check_root()
+                    return True
+        except ContextError as error:
+            if error.code != "not_found":
+                raise
+            self.check_root()
+            return False
+
+    def file_size(self, relative: str) -> int:
+        with self._parent(relative) as (parent, component):
+            with self.native.open_relative(parent, component, role="metadata") as handle:
+                before = self.native.information(handle)
+                if before.directory:
+                    raise ContextError("forbidden_path", "计量只允许非链接普通文件。")
+                self.check_root()
+                if self.native.information(handle) != before:
+                    raise ContextError("version_changed", "计量期间文件版本变化；未返回旧大小。")
+                self.check_root()
+                return before.size
+
     def read(self, relative: str, *, max_bytes: int = MAX_NATIVE_READ, private: bool = False) -> bytes:
         # Reject before opening a directory or creating any object.
         if type(max_bytes) is not int or not 0 <= max_bytes <= (1 << 63) - 2 or type(private) is not bool:

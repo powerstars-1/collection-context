@@ -82,7 +82,10 @@ class SafeFiles:
     def _parent(self, relative: str, *, create: bool = False) -> tuple[int, str]:
         self.check_root()
         parts = self.parts(relative)
-        parent = os.dup(self.fd)
+        try:
+            parent = os.dup(self.fd)
+        except OSError:
+            raise ContextError("storage_unavailable", "资料库句柄不可用；未继续操作。") from None
         try:
             for part in parts[:-1]:
                 if create:
@@ -94,9 +97,65 @@ class SafeFiles:
                 os.close(parent)
                 parent = next_fd
             return parent, parts[-1]
+        except FileNotFoundError:
+            os.close(parent)
+            self.check_root()
+            raise ContextError("not_found", "受控父目录不存在。") from None
         except OSError:
             os.close(parent)
             raise ContextError("forbidden_path", "目录不可访问或包含链接。") from None
+
+    def entry_exists(self, relative: str) -> bool:
+        """Metadata-only presence, not a promise of safe readable file contents.
+
+        Existing directories, links (including broken links), and special nodes
+        count as present. Unsafe/inaccessible parents fail instead of becoming
+        absence. Neither presence nor absence creates or reads any file.
+        """
+        try:
+            parent, name = self._parent(relative)
+        except ContextError as error:
+            if error.code == "not_found":
+                self.check_root()
+                return False
+            raise
+        try:
+            try:
+                os.stat(name, dir_fd=parent, follow_symlinks=False)
+            except FileNotFoundError:
+                exists = False
+            else:
+                exists = True
+            self.check_root()
+            return exists
+        except OSError:
+            raise ContextError("storage_unavailable", "目录项状态无法确认；未当作缺失。") from None
+        finally:
+            os.close(parent)
+
+    def file_size(self, relative: str) -> int:
+        """Count a stable regular single-link file without opening/reading its body."""
+        parent, name = self._parent(relative)
+        try:
+            before = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size < 0:
+                raise ContextError("forbidden_path", "计量只允许非链接普通文件。")
+            self.check_root()
+            after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if tuple(getattr(before, field) for field in fields) != tuple(
+                getattr(after, field) for field in fields
+            ):
+                raise ContextError("version_changed", "计量期间文件身份或版本变化；未返回旧大小。")
+            self.check_root()
+            return before.st_size
+        except FileNotFoundError:
+            self.check_root()
+            raise ContextError("not_found", "计量文件缺失。") from None
+        except OSError:
+            raise ContextError("storage_unavailable", "无法安全计量资料。") from None
+        finally:
+            os.close(parent)
 
     def read(self, relative: str, *, max_bytes: int = 16_000_000, private: bool = False) -> bytes:
         if type(max_bytes) is not int or max_bytes < 0:
