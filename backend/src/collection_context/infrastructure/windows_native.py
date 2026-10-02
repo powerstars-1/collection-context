@@ -36,7 +36,8 @@ import os
 import platform
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Generator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -701,8 +702,30 @@ class WindowsNative:
         consume: Callable[[bytes], object],
         check_cancel: Callable[[], None] = lambda: None,
     ) -> int:
-        # One primitive for buffered reads and bounded hash-only readback; keep
-        # every role, version and ACL guard shared rather than duplicating IO.
+        total = 0
+        with self.read_chunks(
+            handle, max_bytes=max_bytes, private=private, check_cancel=check_cancel
+        ) as chunks:
+            for chunk in chunks:
+                consume(chunk)
+                total += len(chunk)
+        return total
+
+    @contextmanager
+    def read_chunks(
+        self,
+        handle: NativeHandle,
+        *,
+        max_bytes: int = MAX_NATIVE_READ,
+        private: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> Iterator[Iterator[bytes]]:
+        """Single-thread owned stream shared by buffered reads and SHA readback.
+
+        Only exhaustion performs the final version/ACL checks. Early exit closes
+        the generator and releases this scope's IO lock, not the caller's HANDLE.
+        The facade still owns directory/attachment and HANDLE cleanup.
+        """
         if type(max_bytes) is not int or not 0 <= max_bytes <= (1 << 63) - 2:
             raise ContextError("invalid_argument", "原生读取大小上限无效。")
         if type(private) is not bool:
@@ -714,6 +737,7 @@ class WindowsNative:
             raise ContextError("forbidden_path", "只允许读取固定文件角色的句柄。")
         limit = min(max_bytes, 65_536) if handle.role in {"lease_file", "lease_observer"} else max_bytes
         with handle._io_lock:
+            owner = threading.get_ident()
             check_cancel()
             before = self.information(handle)
             if before.size > limit:
@@ -726,34 +750,44 @@ class WindowsNative:
                 raise ContextError("storage_unavailable", "原生文件位置无法确认。")
             if position.value != 0:
                 raise ContextError("storage_unavailable", "原生文件位置不符合读取边界。")
-            total = 0
-            while total <= limit:
-                check_cancel()
-                capacity = min(_READ_CHUNK, limit + 1 - total)
-                buffer, count = ctypes.create_string_buffer(capacity), U32()
-                success = dlls.kernel32.ReadFile(
-                    HANDLE(self._value(handle)), buffer, capacity, ctypes.byref(count), None
-                )
-                if not success:
-                    if dlls.last_error() == 38 and count.value == 0:  # ERROR_HANDLE_EOF
+
+            def consume() -> Generator[bytes, None, None]:
+                total = 0
+                while True:
+                    if threading.get_ident() != owner:
+                        raise ContextError("invalid_argument", "原生分块读取不能跨线程转移。")
+                    check_cancel()
+                    capacity = min(_READ_CHUNK, before.size + 1 - total)
+                    buffer, count = ctypes.create_string_buffer(capacity), U32()
+                    success = dlls.kernel32.ReadFile(
+                        HANDLE(self._value(handle)), buffer, capacity, ctypes.byref(count), None
+                    )
+                    if not success:
+                        if dlls.last_error() == 38 and count.value == 0:  # ERROR_HANDLE_EOF
+                            break
+                        raise ContextError("storage_unavailable", "原生文件读取失败，未返回完整内容。")
+                    if count.value > capacity:
+                        raise ContextError("storage_unavailable", "原生读取长度不符合缓冲区边界。")
+                    if count.value == 0:
                         break
-                    raise ContextError("storage_unavailable", "原生文件读取失败，未返回部分内容。")
-                if count.value > capacity:
-                    raise ContextError("storage_unavailable", "原生读取长度不符合缓冲区边界。")
-                if count.value == 0:
-                    break
-                total += count.value
-                if total > limit:
-                    raise ContextError("version_changed", "读取时文件超过原大小范围。", retryable=True)
-                consume(buffer.raw[: count.value])
+                    total += count.value
+                    if total > before.size:
+                        raise ContextError("version_changed", "读取时文件超过原大小范围。", retryable=True)
+                    check_cancel()
+                    self._value(handle)
+                    yield buffer.raw[: count.value]
+                after = self.information(handle)
+                if before != after or total != before.size:
+                    raise ContextError("version_changed", "读取时文件版本或长度发生变化。", retryable=True)
+                if private:
+                    self.require_private_security(handle)
                 check_cancel()
-            after = self.information(handle)
-            if before != after or total != before.size:
-                raise ContextError("version_changed", "读取时文件版本或长度发生变化。", retryable=True)
-            if private:
-                self.require_private_security(handle)
-            check_cancel()
-            return total
+
+            chunks = consume()
+            try:
+                yield chunks
+            finally:
+                chunks.close()
 
     def try_lock(self, handle: NativeHandle, *, exclusive: bool) -> NativeLock:
         self._value(handle)

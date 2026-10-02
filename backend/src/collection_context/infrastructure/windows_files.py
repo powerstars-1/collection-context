@@ -11,11 +11,11 @@ public platform gate intentionally remains closed.
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.file_stream import validate_stream
+from collection_context.infrastructure.file_stream import MAX_STREAM_BYTES, validate_stream
 from collection_context.infrastructure.windows_deletion import WindowsDeletion
 from collection_context.infrastructure.windows_native import MAX_NATIVE_READ, NativeHandle, WindowsNative
 from collection_context.infrastructure.windows_publication import WindowsPublication
@@ -160,6 +160,41 @@ class WindowsFiles:
                 result = self.native.read_file(handle, max_bytes=max_bytes, private=private)
                 self.check_root()
                 return result
+
+    @contextmanager
+    def read_chunks(
+        self,
+        relative: str,
+        *,
+        max_bytes: int = MAX_STREAM_BYTES,
+        private: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> Iterator[Iterator[bytes]]:
+        if (
+            type(max_bytes) is not int
+            or not 0 <= max_bytes <= MAX_STREAM_BYTES
+            or type(private) is not bool
+            or not callable(check_cancel)
+        ):
+            raise ContextError("invalid_argument", "分块读取上限、权限或取消检查无效。")
+        check_cancel()
+        with self._parent(relative) as (parent, component):
+            with self.native.open_relative(parent, component, role="read_file") as handle:
+                with self.native.read_chunks(
+                    handle, max_bytes=max_bytes, private=private, check_cancel=check_cancel
+                ) as chunks:
+
+                    def attached() -> Generator[bytes, None, None]:
+                        for chunk in chunks:
+                            self.check_root()
+                            yield chunk
+                        self.check_root()
+
+                    source = attached()
+                    try:
+                        yield source
+                    finally:
+                        source.close()
 
     def write(self, relative: str, data: bytes, *, replace: bool = False) -> None:
         if type(data) is not bytes or type(replace) is not bool:

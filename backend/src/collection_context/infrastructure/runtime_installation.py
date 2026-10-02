@@ -8,7 +8,6 @@ has a truthful commit-unknown boundary if replace happened but fsync failed.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 import struct
@@ -17,13 +16,14 @@ import threading
 import unicodedata
 import uuid
 import zipfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
 from collection_context.application.contracts import ContextError, canonical_bytes
+from collection_context.infrastructure.file_stream import ChunkReader, ChunkWriter
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.ownership import _FileLease
 from collection_context.infrastructure.platform_safety import require_safe_files_runtime
@@ -331,40 +331,49 @@ class RuntimeInstaller:
     ) -> None:
         path = _absolute(path)
         with SafeFiles(path.parent) as source:
-            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source.fd)
-            target = -1
-            try:
-                before = os.fstat(fd)
-                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size != plan.bytes:
-                    raise _error("runtime_install_integrity")
-                target = os.open(
-                    _SNAPSHOT, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=stage.fd
-                )
-                digest, size = hashlib.sha256(), 0
-                while True:
-                    _cancel(stop)
-                    data = os.read(fd, min(COPY_CHUNK_BYTES, plan.bytes + 1 - size))
-                    if not data:
-                        break
-                    size += len(data)
-                    if size > plan.bytes:
-                        raise _error("runtime_install_integrity")
-                    digest.update(data)
-                    cls._write_all(target, data)
-                current = os.stat(path.name, dir_fd=source.fd, follow_symlinks=False)
-                source.check_root()
-                if (
-                    _identity(before) != _identity(os.fstat(fd))
-                    or _identity(before) != _identity(current)
-                    or size != plan.bytes
-                    or digest.hexdigest() != plan.sha256
-                ):
-                    raise _error("runtime_install_integrity")
-                os.fsync(target)
-            finally:
-                os.close(fd)
-                if target >= 0:
-                    os.close(target)
+            cls._copy_snapshot(stage, source, path.name, plan, stop)
+
+    @staticmethod
+    def _copy_snapshot(
+        stage: ChunkWriter,
+        source: ChunkReader,
+        name: str,
+        plan: ArtifactPlan,
+        stop: threading.Event | None,
+    ) -> None:
+        # The file backend owns IO, EOF version/attachment proof and handles.
+        # The installer supplies fixed-catalog identity, not an untrusted writer.
+        def check_cancel() -> None:
+            _cancel(stop)
+
+        try:
+            with source.read_chunks(name, max_bytes=plan.bytes, check_cancel=check_cancel) as chunks:
+
+                def snapshot_chunks() -> Generator[bytes, None, None]:
+                    try:
+                        yield from chunks
+                    except ContextError as error:
+                        if error.code in {"version_changed", "forbidden_path"}:
+                            # This is a known producer integrity failure before
+                            # publication, not an uncertain target rename result.
+                            raise ContextError("file_stream_integrity", "归档来源在复制期间变化。") from None
+                        raise
+
+                producer = snapshot_chunks()
+                try:
+                    stage.write_chunks(
+                        _SNAPSHOT,
+                        producer,
+                        expected_size=plan.bytes,
+                        expected_sha256=plan.sha256,
+                        check_cancel=check_cancel,
+                    )
+                finally:
+                    producer.close()
+        except ContextError as error:
+            if error.code in {"file_stream_integrity", "version_changed", "forbidden_path"}:
+                raise _error("runtime_install_integrity") from None
+            raise
 
     @classmethod
     def _member(

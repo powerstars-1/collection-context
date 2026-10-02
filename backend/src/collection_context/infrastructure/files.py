@@ -5,12 +5,19 @@ from __future__ import annotations
 import hashlib
 import os
 import stat
+import threading
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from collection_context.application.contracts import ContextError
-from collection_context.infrastructure.file_stream import STREAM_CHUNK_BYTES, validate_stream, verified_chunks
+from collection_context.infrastructure.file_stream import (
+    MAX_STREAM_BYTES,
+    STREAM_CHUNK_BYTES,
+    validate_stream,
+    verified_chunks,
+)
 from collection_context.infrastructure.platform_safety import require_safe_files_runtime
 
 
@@ -159,6 +166,122 @@ class SafeFiles:
             raise ContextError("storage_unavailable", "无法安全计量资料。") from None
         finally:
             os.close(parent)
+
+    @contextmanager
+    def read_chunks(
+        self,
+        relative: str,
+        *,
+        max_bytes: int = MAX_STREAM_BYTES,
+        private: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> Iterator[Iterator[bytes]]:
+        """Owned, bounded file stream; only exhausting EOF proves a stable read.
+
+        This scope and its iterator belong to one thread. Early exit closes our
+        file/parent handles, but is not an integrity signoff. Publication callers
+        must also validate the expected SHA and size before committing a copy.
+        """
+        if (
+            type(max_bytes) is not int
+            or not 0 <= max_bytes <= MAX_STREAM_BYTES
+            or type(private) is not bool
+            or not callable(check_cancel)
+        ):
+            raise ContextError("invalid_argument", "分块读取上限、权限或取消检查无效。")
+        check_cancel()
+        owner = threading.get_ident()
+        parent, name = self._parent(relative)
+        fd = -1
+        chunks = None
+        yielded = False
+        try:
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > max_bytes:
+                raise ContextError("forbidden_path", "分块读取只允许大小受限的非链接普通文件。")
+            if private and (before.st_mode & 0o077 or before.st_uid != os.getuid()):
+                raise ContextError("unsafe_secret_permissions", "分块凭据读取需要私有文件权限。")
+            fields = (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_uid",
+                "st_nlink",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            expected = tuple(getattr(before, field) for field in fields)
+            parent_info = os.fstat(parent)
+            parent_identity = (parent_info.st_dev, parent_info.st_ino)
+
+            def produce() -> Iterator[bytes]:
+                total = 0
+                while True:
+                    if threading.get_ident() != owner:
+                        raise ContextError("invalid_argument", "分块读取不能跨线程转移。")
+                    check_cancel()
+                    self.check_root()
+                    body = os.read(fd, min(STREAM_CHUNK_BYTES, before.st_size + 1 - total))
+                    check_cancel()
+                    if not body:
+                        break
+                    total += len(body)
+                    if total > before.st_size:
+                        raise ContextError("version_changed", "分块读取期间文件增长；未确认完整性。")
+                    yield body
+                after = os.fstat(fd)
+                current = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                if (
+                    total != before.st_size
+                    or tuple(getattr(after, field) for field in fields) != expected
+                    or tuple(getattr(current, field) for field in fields) != expected
+                ):
+                    raise ContextError("version_changed", "分块读取期间文件身份或版本变化。")
+                current_parent, _ = self._parent(relative)
+                try:
+                    current_info = os.fstat(current_parent)
+                    if (current_info.st_dev, current_info.st_ino) != parent_identity:
+                        raise ContextError("version_changed", "分块读取父目录路径变化。")
+                finally:
+                    os.close(current_parent)
+                self.check_root()
+                check_cancel()
+
+            def consume() -> Generator[bytes, None, None]:
+                try:
+                    yield from produce()
+                except FileNotFoundError:
+                    self.check_root()
+                    raise ContextError("not_found", "分块读取文件已缺失。") from None
+                except OSError:
+                    raise ContextError(
+                        "storage_unavailable", "分块读取未完成；没有返回完整性证明。"
+                    ) from None
+
+            chunks = consume()
+            yielded = True
+            yield chunks
+        except FileNotFoundError:
+            if yielded:
+                raise  # A consumer exception is not a source IO diagnosis.
+            self.check_root()
+            raise ContextError("not_found", "分块读取文件已缺失。") from None
+        except OSError:
+            if yielded:
+                raise
+            raise ContextError("storage_unavailable", "分块读取未完成；没有返回完整性证明。") from None
+        finally:
+            try:
+                if chunks is not None:
+                    chunks.close()
+            finally:
+                try:
+                    if fd >= 0:
+                        os.close(fd)
+                finally:
+                    os.close(parent)
 
     def read(self, relative: str, *, max_bytes: int = 16_000_000, private: bool = False) -> bytes:
         if type(max_bytes) is not int or max_bytes < 0:

@@ -5,11 +5,37 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import AbstractContextManager
+from typing import Protocol
 
 from collection_context.application.contracts import ContextError
 
 STREAM_CHUNK_BYTES = 65_536
 MAX_STREAM_BYTES = 2_147_483_648
+
+
+class ChunkReader(Protocol):
+    def read_chunks(
+        self,
+        relative: str,
+        *,
+        max_bytes: int = MAX_STREAM_BYTES,
+        private: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> AbstractContextManager[Iterator[bytes]]: ...
+
+
+class ChunkWriter(Protocol):
+    def write_chunks(
+        self,
+        relative: str,
+        chunks: Iterable[bytes],
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        replace: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> None: ...
 
 
 def validate_stream(expected_size: int, expected_sha256: str, replace: bool = False) -> None:
