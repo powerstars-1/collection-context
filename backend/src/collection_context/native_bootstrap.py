@@ -179,7 +179,8 @@ def dispatch(argv: Sequence[str] | None = None) -> int:
         print("用法：CollectionContext <cli|mcp|web|launch|desktop> [对应入口参数]")
         print("cli：资料库命令；mcp：stdio AI工具；web：显式认证服务；launch：终端本机启动器。")
         print("desktop：本机选库与启动/停止窗口（需要可用的本地 GUI）。")
-        print("浏览器、FFmpeg、OCR 权重不在这个基础包中；未配置模型不会提供识别服务。")
+        print("浏览器、FFmpeg、OCR 组件以安装清单为准；浏览器运行文件需单独安装，媒体/OCR可随候选包携带。")
+        print("组件随包不等于已安装或功能验收；未配置模型不会提供云端识别服务。")
         return 0
     if args[0] not in MODES:
         print("invalid_mode: 请选择 cli、mcp、web、launch 或 desktop；不会启动其他程序。", file=sys.stderr)

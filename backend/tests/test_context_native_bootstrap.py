@@ -69,7 +69,10 @@ def test_token_shape_rejects_non_product_secret(token):
 
 def test_no_argument_and_unknown_mode_do_not_start_or_create(capsys):
     assert dispatch([]) == 0
-    assert "浏览器、FFmpeg、OCR" in capsys.readouterr().out
+    message = capsys.readouterr().out
+    assert "浏览器、FFmpeg、OCR" in message
+    assert "以安装清单为准" in message and "随包不等于已安装" in message
+    assert "不在这个基础包" not in message
     assert dispatch(["shell", "anything"]) == 2
     assert "invalid_mode" in capsys.readouterr().err
 

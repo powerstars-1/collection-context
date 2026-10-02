@@ -275,6 +275,8 @@ def test_main_abandons_readonly_check_without_claiming_syscall_cancelled(monkeyp
     joins = []
     window.controller.join = lambda timeout: joins.append(timeout)
     window.show = lambda: None
+    # This deliberately constructor-free fixture tests diagnostic shutdown only.
+    window.restore_selection = lambda **fields: None
     window.diagnostics.request(window._diagnostic_parameters())
     assert entered.wait(2)
     monkeypatch.setattr("collection_context.native_desktop._DesktopWindow", lambda *args: window)

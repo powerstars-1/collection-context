@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 
 from collection_context.application.contracts import ContextError
+from collection_context.application.desktop_preferences import DesktopPreferences, DesktopSelection
 from collection_context.diagnostics import default_workspace, startup_report
 from collection_context.native_bootstrap import _TokenWindow, present_owner_token
 
@@ -334,10 +335,15 @@ class DesktopController:
     """GUI-independent lifecycle. Construction and selection never start work."""
 
     def __init__(
-        self, *, launch_service: Callable[..., int] | None = None, operation_lock: Any = None
+        self,
+        *,
+        launch_service: Callable[..., int] | None = None,
+        operation_lock: Any = None,
+        remember_selection: Callable[[DesktopSelection], None] | None = None,
     ) -> None:
         self.events: queue.Queue[DesktopStatus | OwnerPrompt] = queue.Queue()
         self._launch_service = launch_service
+        self._remember_selection = remember_selection
         self._worker: threading.Thread | None = None
         self._lock = threading.Lock()
         self._operation_lock = operation_lock if operation_lock is not None else threading.Lock()
@@ -398,11 +404,21 @@ class DesktopController:
             self._status("failed", "本机服务线程未能启动。", "desktop_display_required")
             raise ContextError("desktop_display_required", "本机服务线程未能启动。") from None
 
-    def _ready(self) -> None:
+    def _ready(self, selection: DesktopSelection | None = None) -> None:
         with self._lock:
-            if not self.stop_event.is_set() and self.state == "starting":
-                self.state = "running"
-                self.events.put(DesktopStatus("running", "管理页已就绪；请在本机浏览器登录。"))
+            if self.stop_event.is_set() or self.state != "starting":
+                return
+            self.state = "running"
+            self.events.put(DesktopStatus("running", "管理页已就绪；请在本机浏览器登录。"))
+        # The ready notification comes from the service's health watcher, never
+        # Tk. Failed/cancelled starts and mere selections do not save anything.
+        if selection is not None and self._remember_selection is not None:
+            try:
+                self._remember_selection(selection)
+            except BaseException:
+                self.events.put(
+                    DesktopStatus("running", "管理页已就绪；上次选库位置未能保存，下次需重新选择。")
+                )
 
     def _present_from_worker(self, token: str) -> bool:
         prompt = OwnerPrompt(token)
@@ -487,7 +503,14 @@ class DesktopController:
                 port=port,
                 initialize_empty=initialize_empty,
                 no_browser=False,
-                output=cast(TextIO, _DiscardOutput(self._ready)),
+                output=cast(
+                    TextIO,
+                    _DiscardOutput(
+                        lambda: self._ready(
+                            DesktopSelection(workspace.expanduser().absolute(), port, legacy_readonly)
+                        )
+                    ),
+                ),
                 owner_presenter=self._present_from_worker,
                 stop_event=self.stop_event,
                 **options,
@@ -607,7 +630,13 @@ class _DesktopWindow:
 
         self.root = tk.Tk()
         operation_lock = threading.Lock()
-        self.controller = DesktopController(operation_lock=operation_lock)
+        self.preferences = DesktopPreferences(default_workspace().parent / "desktop")
+        self._preference_events: queue.Queue[tuple[int, DesktopSelection | None, bool]] = queue.Queue()
+        self._preference_worker: threading.Thread | None = None
+        self._restore_fields = (False, False)
+        self.controller = DesktopController(
+            operation_lock=operation_lock, remember_selection=self.preferences.save
+        )
         self.installation = DesktopInstallation(operation_lock=operation_lock)
         self.diagnostics = DesktopDiagnostics()
         self._diagnostic_cache: DiagnosticResult | None = None
@@ -713,6 +742,64 @@ class _DesktopWindow:
         except BaseException:
             pass
 
+    def restore_selection(self, *, workspace: bool, port: bool) -> None:
+        """Read only in a daemon; an edit/Start/Close invalidates the result."""
+        if not workspace and not port:
+            return
+        self._restore_fields = (workspace, port)
+        generation = self.diagnostics.generation
+
+        def read() -> None:
+            selection = None
+            failed = False
+            try:
+                selection = self.preferences.load()
+            except BaseException:
+                failed = True
+            self._preference_events.put((generation, selection, failed))
+
+        self._preference_worker = threading.Thread(
+            target=read, name="collection-context-desktop-selection", daemon=True
+        )
+        self._preference_worker.start()
+
+    def _poll_preferences(self) -> None:
+        events = getattr(self, "_preference_events", None)
+        if events is None:
+            return
+        while True:
+            try:
+                generation, selection, failed = events.get_nowait()
+            except queue.Empty:
+                return
+            if (
+                self.close_requested
+                or self.controller.active
+                or self._installation_active()
+                or self._start_intent is not None
+                or generation != self.diagnostics.generation
+            ):
+                continue
+            if failed:
+                self.status.set("上次选库记录不可用；请自行选择资料库。未修复或启动任何服务。")
+                continue
+            if selection is None:
+                continue
+            restore_workspace, restore_port = self._restore_fields
+            if restore_workspace:
+                self.workspace.set(str(selection.workspace))
+                self.legacy_readonly.set(selection.legacy_readonly)
+            if restore_port:
+                self.port.set(str(selection.port))
+            # No stored flag can grant initialization, credentials, sync or
+            # paid processing. Permissions need this launch's explicit consent.
+            self.initialize.set(False)
+            for variable in self.permission_variables:
+                variable.set(False)
+            self._legacy_mode_changed()
+            self._refresh_dependencies()
+            self.status.set("已恢复上次成功启动的库位置；尚未启动，能力权限需重新选择。")
+
     def _choose(self) -> None:
         if self.controller.active or self._installation_active() or self.close_requested:
             return
@@ -766,8 +853,8 @@ class _DesktopWindow:
         self._diagnostic_cache = None
         self._start_intent = None
         self._install_generation = getattr(self, "_install_generation", 0) + 1
-        self.dependencies.set("参数已更新，需重新检测；没有安装或下载任何组件。")
-        self.status.set("尚未启动；请重新检测当前资料库和端口。")
+        self.dependencies.set("参数已更新；点击启动时会重新检测，没有安装或下载任何组件。")
+        self.status.set("尚未启动；请点击“启动并打开管理页”，先检测当前资料库和端口。")
         self._controls(self.controller.active)
 
     def _refresh_dependencies(self) -> dict[str, Any] | None:
@@ -1098,6 +1185,7 @@ class _DesktopWindow:
             return
         # Schedule before a nested token dialog so Stop/Close remains responsive.
         self.root.after(75, self._poll)
+        self._poll_preferences()
         self._poll_diagnostics()
         while True:
             try:
@@ -1174,13 +1262,19 @@ class _DesktopWindow:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="显式打开本机选库/启动/停止窗口；不自动初始化。")
-    parser.add_argument("--workspace", type=Path, default=default_workspace())
-    parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--workspace", type=Path, help="指定本次资料库，不沿用上次的库位置或模式。")
+    parser.add_argument("--port", type=int, help="指定本次端口，不沿用上次的端口。")
     args = parser.parse_args(argv)
     window = None
     result = 0
     try:
-        window = _DesktopWindow(args.workspace, args.port)
+        window = _DesktopWindow(
+            args.workspace if args.workspace is not None else default_workspace(),
+            args.port if args.port is not None else 8787,
+        )
+        restore = getattr(window, "restore_selection", None)
+        if restore is not None:
+            restore(workspace=args.workspace is None, port=args.port is None)
         window.show()
     except BaseException:
         print("desktop_display_required: 本机 GUI 不可用或运行中断，未显示内部异常。", file=sys.stderr)
