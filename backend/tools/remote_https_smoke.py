@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import io
 import json
 import os
 import platform
@@ -18,10 +19,11 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import collection_context
 from collection_context.application.contracts import ContextError, digest
@@ -30,6 +32,143 @@ from collection_context.library.store import LibraryStore
 
 REQUEST_TIMEOUT = 10.0
 MAX_RESPONSE_BYTES = 256_000
+STARTUP_TIMEOUT = 8.0
+MAX_STARTUP_LOG_BYTES = 65_536
+
+
+class StartupFailure(RuntimeError):
+    def __init__(self, code: str, observation: dict[str, Any]):
+        # Observations contain only our counters and fixed categories, never
+        # subprocess text, request data, paths, tokens or exception strings.
+        self.code = (
+            code
+            if code in {"product_https_server_exited", "product_https_server_not_ready"}
+            else "product_https_startup_failed"
+        )
+        super().__init__(self.code)
+        self.observation = observation
+
+    def __str__(self) -> str:
+        return self.code + "; " + json.dumps(self.observation, sort_keys=True)
+
+
+class DiagnosticPipe(Protocol):
+    def read1(self, size: int = -1, /) -> bytes: ...
+    def close(self) -> None: ...
+
+
+class StartupLogs:
+    """Drain our own child's pipe; retain categories, not log contents/files."""
+
+    def __init__(self, stream: DiagnosticPipe):
+        self.stream = stream
+        self._lock = threading.Lock()
+        self._bytes = 0
+        self._clipped = False
+        self._category = "none"
+        self._thread = threading.Thread(target=self._drain, daemon=True, name="isolated-https-startup")
+        self._thread.start()
+
+    def _drain(self) -> None:
+        tail = b""
+        categories = (
+            (b"address already in use", "bind_failed"),
+            (b"error while attempting to bind", "bind_failed"),
+            (b"modulenotfounderror", "dependency_missing"),
+            (b"importerror", "dependency_missing"),
+            (b"sslerror", "tls_failed"),
+            (b"access_setup_required:", "access_setup_required"),
+            (b"storage_unavailable:", "storage_unavailable"),
+            (b"traceback", "error_logged"),
+            (b"error:", "error_logged"),
+        )
+        try:
+            while chunk := self.stream.read1(1024):
+                with self._lock:
+                    remaining = MAX_STARTUP_LOG_BYTES - self._bytes
+                    self._clipped |= len(chunk) > remaining
+                    selected = chunk[:remaining]
+                    self._bytes += len(selected)
+                    window = tail + selected.lower()
+                    # Even overflow is drained to prevent a blocked child pipe;
+                    # unbounded output is not retained or inspected after cap.
+                    if self._category in {"none", "error_logged"}:
+                        for pattern, category in categories:
+                            if pattern in window:
+                                self._category = category
+                                break
+                    tail = window[-256:] if remaining else b""
+        except (OSError, ValueError):
+            with self._lock:
+                self._category = "capture_unavailable"
+        finally:
+            try:
+                self.stream.close()
+            except (OSError, ValueError):
+                with self._lock:
+                    self._category = "capture_unavailable"
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "stderr_class": self._category,
+                "stderr_inspected_bytes": self._bytes,
+                "stderr_over_limit": self._clipped,
+            }
+
+    def finish(self) -> None:
+        # Called after our child is stopped and its pipe should be at EOF.
+        self._thread.join(timeout=1)
+        if self._thread.is_alive():
+            raise RuntimeError("https_startup_capture_not_stopped")
+
+
+def _wait_ready(process: subprocess.Popen, port: int, context: ssl.SSLContext, logs: StartupLogs) -> dict:
+    started = time.monotonic()
+    deadline, attempts, last_probe = started + STARTUP_TIMEOUT, 0, "not_probed"
+
+    def observation(state: str) -> dict[str, Any]:
+        return {
+            "state": state,
+            "elapsed_ms": max(0, round((time.monotonic() - started) * 1000)),
+            "budget_ms": round(STARTUP_TIMEOUT * 1000),
+            "attempts": attempts,
+            "last_probe": last_probe,
+            **logs.snapshot(),
+        }
+
+    while True:
+        if process.poll() is not None:
+            raise StartupFailure("product_https_server_exited", observation("exited"))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StartupFailure("product_https_server_not_ready", observation("deadline"))
+        attempts += 1
+        try:
+            code, response, _ = _request(port, context, "/health", timeout=min(0.5, remaining))
+            data = response.get("data") if isinstance(response, dict) else None
+            if (
+                code == 200
+                and isinstance(response, dict)
+                and response.get("ok") is True
+                and isinstance(data, dict)
+                and data.get("service") == "collection-context"
+                and data.get("development_candidate") is True
+            ):
+                last_probe = "verified_product_health"
+                if process.poll() is not None:
+                    raise StartupFailure("product_https_server_exited", observation("exited"))
+                if time.monotonic() > deadline:
+                    raise StartupFailure("product_https_server_not_ready", observation("deadline"))
+                return observation("ready")
+            last_probe = "wrong_product_health"
+        except ssl.SSLCertVerificationError:
+            last_probe = "certificate_rejected"
+        except (OSError, http.client.HTTPException):
+            last_probe = "connection_unavailable"
+        except (ValueError, TypeError):
+            last_probe = "protocol_error"
+        time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
 def _request(
@@ -118,6 +257,8 @@ def run_smoke() -> dict[str, Any]:
         assert verified.check_hostname and verified.verify_mode == ssl.CERT_REQUIRED
         store = LibraryStore.initialize(directory / "原创合成 HTTPS 库")
         process: subprocess.Popen | None = None
+        startup_logs: StartupLogs | None = None
+        startup_failure: StartupFailure | None = None
         try:
             item = store.upsert(
                 {"native_id": "99887766", "title": "原创 HTTPS 合成教程", "body": "不是实际同步作品"},
@@ -169,21 +310,11 @@ def run_smoke() -> dict[str, Any]:
                 cwd=directory,
                 env=environment,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
-            ready = time.monotonic() + 8
-            while True:
-                if process.poll() is not None:
-                    raise RuntimeError("product_https_server_exited")
-                try:
-                    code, response, _ = _request(port, verified, "/health", timeout=0.5)
-                    if code == 200 and response["ok"]:
-                        break
-                except (OSError, http.client.HTTPException):
-                    pass
-                if time.monotonic() >= ready:
-                    raise RuntimeError("product_https_server_not_ready")
-                time.sleep(0.05)
+            assert isinstance(process.stderr, io.BufferedReader)
+            startup_logs = StartupLogs(process.stderr)
+            startup = _wait_ready(process, port, verified, startup_logs)
             checks: list[str] = ["product_remote_server_real_tls_started"]
             # Default public trust must reject our temporary private test certificate.
             try:
@@ -272,6 +403,7 @@ def run_smoke() -> dict[str, Any]:
                     "timeout_seconds": REQUEST_TIMEOUT,
                 },
                 "transport": "real_remote_mode_HTTPS_over_loopback",
+                "startup": startup,
                 "server": {
                     "entrypoint": "collection_context.interfaces.server",
                     "fastapi": version("fastapi"),
@@ -289,15 +421,34 @@ def run_smoke() -> dict[str, Any]:
                 ],
                 "library_state_digest_unchanged": digest(original),
             }
+        except StartupFailure as error:
+            startup_failure = error
+            raise
         finally:
             if process is not None:
                 _stop(process)
+            if startup_logs is not None:
+                startup_logs.finish()
+                if startup_failure is not None:
+                    startup_failure.observation.update(startup_logs.snapshot())
             store.close()
 
 
 def main() -> int:
     try:
         result = run_smoke()
+    except StartupFailure as error:
+        print(
+            json.dumps(
+                {
+                    "result": "failed",
+                    "error": "controlled_https_smoke_failed",
+                    "startup": error.observation,
+                    "secrets_logged": False,
+                }
+            )
+        )
+        return 1
     except (
         ContextError,
         RuntimeError,
