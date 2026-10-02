@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from collection_context.application.agent_addition import AgentAdditionGateway
-from collection_context.application.contracts import ContextError, envelope
+from collection_context.application.contracts import ARTIFACT_KINDS, ContextError, envelope
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.browser import BrowserSession
 from collection_context.infrastructure.files import SafeFiles
@@ -73,6 +73,11 @@ def parser() -> argparse.ArgumentParser:
     legacy.add_argument("--ref", required=True, help="已入库的稳定资料引用；需人工核对同一作品")
     legacy.add_argument("--preview-token", help="先预览；再次携带返回的标识并确认")
     legacy.add_argument("--confirm-binding", action="store_true", help="明确确认只创建这一个引用映射")
+    edits = commands.add_parser("accept-edit", help="库主人核对外部编辑的已登记Markdown，不调用模型")
+    edits.add_argument("--ref", required=True)
+    edits.add_argument("--artifact", required=True, choices=ARTIFACT_KINDS)
+    edits.add_argument("--preview-token", help="先预览；确认时携带预览标识")
+    edits.add_argument("--confirm-edit", action="store_true", help="明确接纳正文并使依赖结果过期")
     access = commands.add_parser("access-key", help="本地建立产品访问口令；仅在本终端显示一次，不是模型 Key")
     access.add_argument("--name", required=True)
     access.add_argument("--ui", action="store_true", help="同时允许登录页面；不授予处理或计费权限")
@@ -317,6 +322,18 @@ def main(argv: list[str] | None = None) -> int:
                     raise ContextError("confirmation_required", "携带预览标识仍须明确确认映射。")
                 else:
                     data = aliases.preview(args.legacy_ref, args.ref)
+            elif args.command == "accept-edit":
+                from collection_context.application.library_management import LibraryManagement
+
+                edits = LibraryManagement(store, authorize=lambda: None)
+                if args.confirm_edit:
+                    data = edits.accept_edit(
+                        args.ref, artifact=args.artifact, preview_token=args.preview_token, confirmed=True
+                    )
+                elif args.preview_token is not None:
+                    raise ContextError("confirmation_required", "携带预览标识仍须明确确认接纳修改。")
+                else:
+                    data = edits.preview_edit(args.ref, artifact=args.artifact)
             elif args.command == "submit-link":
                 from collection_context.workflows.addition import AdditionWorkflow
 

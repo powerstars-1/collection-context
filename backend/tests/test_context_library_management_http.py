@@ -117,3 +117,69 @@ def test_revoked_session_and_query_are_rejected(client):
     assert web.post(PREFIX + "overview?path=secret", json={}, headers=headers).status_code == 400
     policy.revoke("p_owner")
     assert web.post(PREFIX + "overview", json={}, headers=headers).status_code == 401
+
+
+def test_edit_preview_confirm_owner_session_only_and_immediate_reads(client):
+    web, store, ref, headers, _ = client
+    artifact = store.get(ref)["artifacts"]["screen"]
+    (store.files.root / artifact["path"]).write_text("人工修改HTTP关键词", encoding="utf-8")
+    payload = {"material_ref": ref, "artifact": "screen"}
+    assert web.post(PREFIX + "edit-preview", json=payload).status_code == 403
+    assert (
+        web.post(
+            PREFIX + "edit-preview", json=payload, headers={"Authorization": "Bearer " + OWNER}
+        ).status_code
+        == 403
+    )
+    assert (
+        web.post(
+            PREFIX + "edit-preview", json={**payload, "path": "/etc/passwd"}, headers=headers
+        ).status_code
+        == 400
+    )
+    assert (
+        web.post(PREFIX + "edit-preview", json={**payload, "artifact": []}, headers=headers).status_code
+        == 400
+    )
+    before = store.snapshot()
+    preview = web.post(PREFIX + "edit-preview", json=payload, headers=headers).json()["data"]
+    assert store.snapshot() == before and preview["changed"]
+    result = web.post(
+        PREFIX + "edit-confirm",
+        json={**payload, "preview_token": preview["preview_token"], "confirmed": True},
+        headers=headers,
+    )
+    assert result.json()["ok"] and result.json()["data"]["model_requests"] == 0
+    assert (
+        web.post(
+            "/v1/collections/read", json={"material_ref": ref, "artifact": "screen"}, headers=headers
+        ).json()["data"]["text"]
+        == "人工修改HTTP关键词"
+    )
+    assert (
+        web.post(
+            PREFIX + "edit-confirm",
+            json={**payload, "preview_token": preview["preview_token"], "confirmed": True},
+            headers=headers,
+        ).status_code
+        == 409
+    )
+
+
+def test_revoked_owner_cannot_accept_preview(client):
+    web, store, ref, headers, policy = client
+    path = store.get(ref)["artifacts"]["screen"]["path"]
+    (store.files.root / path).write_text("人工修正", encoding="utf-8")
+    payload = {"material_ref": ref, "artifact": "screen"}
+    preview = web.post(PREFIX + "edit-preview", json=payload, headers=headers).json()["data"]
+    before = store.snapshot()
+    policy.revoke("p_owner")
+    assert (
+        web.post(
+            PREFIX + "edit-confirm",
+            json={**payload, "preview_token": preview["preview_token"], "confirmed": True},
+            headers=headers,
+        ).status_code
+        == 401
+    )
+    assert store.snapshot() == before

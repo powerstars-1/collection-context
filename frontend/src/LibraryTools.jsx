@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 
 const button='rounded-xl border border-zinc-200 px-3 py-2 text-sm text-zinc-700 transition hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400 disabled:opacity-45';
 const endpoint='/v1/management/library/';
+const artifactNames={original:'原文',audio:'音频转写',screen:'画面文字',image:'图片提取',summary:'内容总结',readable:'可读内容',user_note:'用户备注'};
 const bytes=value=>value<1024?`${value} B`:value<1024**2?`${(value/1024).toFixed(1)} KB`:value<1024**3?`${(value/1024**2).toFixed(2)} MB`:`${(value/1024**3).toFixed(2)} GB`;
 
 export function ItemTools({api,download,item,excluded=false,onChanged}) {
   const [preview,setPreview]=useState(null);
   const [confirmed,setConfirmed]=useState(false);
   const [mediaScope,setScope]=useState('none');
+  const [editKind,setEditKind]=useState('screen');
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState('');
   const [notice,setNotice]=useState('');
@@ -23,14 +25,15 @@ export function ItemTools({api,download,item,excluded=false,onChanged}) {
   }
   async function prepare(type) {
     setPreview(null);setConfirmed(false);
-    const value=await perform(()=>api(endpoint+(type==='export'?'export-preview':'exclusion-preview'),{
-      material_ref:item.material_ref,...(type==='export'?{media_scope:mediaScope}:{excluded:!excluded})}));
+    const value=await perform(()=>api(endpoint+(type==='edit'?'edit-preview':type==='export'?'export-preview':'exclusion-preview'),{
+      material_ref:item.material_ref,...(type==='edit'?{artifact:editKind}:type==='export'?{media_scope:mediaScope}:{excluded:!excluded})}));
     if(value)setPreview({type,...value});
   }
   async function commit() {
     if(!preview||!confirmed)return;
     const value=await perform(async()=>{
       const payload={material_ref:item.material_ref,preview_token:preview.preview_token,confirmed:true};
+      if(preview.type==='edit')return api(endpoint+'edit-confirm',{...payload,artifact:preview.artifact});
       if(preview.type==='export') {
         const blob=await download(endpoint+'export',{...payload,media_scope:preview.media_scope});
         const url=URL.createObjectURL(blob);
@@ -55,17 +58,25 @@ export function ItemTools({api,download,item,excluded=false,onChanged}) {
       {!excluded && <>
         <label className="text-xs text-zinc-500">导出范围 <select aria-label="导出范围" className="rounded-lg border border-zinc-200 p-2" value={mediaScope} disabled={busy} onChange={event=>{setScope(event.target.value);setPreview(null);setConfirmed(false)}}><option value="none">文字与来源</option><option value="all">文字、来源与媒体</option></select></label>
         <button type="button" className={button} disabled={busy} onClick={()=>prepare('export')}>预览导出</button>
+        <label className="text-xs text-zinc-500">核对正文 <select aria-label="核对正文类型" className="rounded-lg border border-zinc-200 p-2" value={editKind} disabled={busy} onChange={event=>{setEditKind(event.target.value);setPreview(null);setConfirmed(false)}}>{Object.entries(artifactNames).map(([kind,name])=><option key={kind} value={kind}>{name}</option>)}</select></label>
+        <button type="button" className={button} disabled={busy} onClick={()=>prepare('edit')}>核对外部编辑</button>
       </>}
     </div>
     {busy&&<p role="status" className="mt-3 text-sm text-zinc-500">正在校验资料…</p>}
     {error&&<p role="alert" className="mt-3 text-sm text-rose-700">{error}</p>}
     {notice&&<p role="status" className="mt-3 text-xs text-zinc-500">{notice}</p>}
     {preview&&<div className="mt-3 rounded-xl bg-zinc-50 p-3 text-xs leading-6 text-zinc-600">
-      <p>{preview.type==='export'?`${preview.files.length} 个文件 · ${bytes(preview.total_bytes)} · 不含凭据 · ${preview.omitted_media_files} 个媒体未包含`:preview.excluded?'确认后此资料将不再提供给 AI，原文件不会删除。':'确认后此资料恢复搜索和读取，原文件不会删除。'}</p>
+      <p>{preview.type==='edit'?preview.changed?'确认后保存修改快照、更新索引；原文件保留，不调用模型。':'正文未发生变化，无需接纳。':preview.type==='export'?`${preview.files.length} 个文件 · ${bytes(preview.total_bytes)} · 不含凭据 · ${preview.omitted_media_files} 个媒体未包含`:preview.excluded?'确认后此资料将不再提供给 AI，原文件不会删除。':'确认后此资料恢复搜索和读取，原文件不会删除。'}</p>
+      {preview.type==='edit'&&<>
+        <p>以下是修改后正文；原文件已被外部编辑，无法提供可信的修改前逐行对比。</p>
+        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-zinc-200 bg-white p-3">{preview.text_preview}</pre>
+        {preview.preview_truncated&&<p>这里只显示前 2000 字；请在本地核对全文后确认。</p>}
+        <p>将标为过期：{preview.invalidated_artifacts.map(kind=>artifactNames[kind]).join('、')||'无'}。人工接纳不代表识别准确率已验证；重新提取不能直接覆盖人工修改。</p>
+      </>}
       {preview.type==='export'&&<details><summary className="cursor-pointer">查看导出文件清单</summary><ul className="mt-2 list-inside list-disc">{preview.files.map(file=><li key={file.name}>{file.name} · {bytes(file.bytes)}</li>)}</ul></details>}
       {preview.pending_jobs>0&&<p className="text-amber-800">库中还有 {preview.pending_jobs} 个待处理任务，请先完成或取消后再操作。</p>}
       <label className="mt-2 flex items-center gap-2"><input type="checkbox" checked={confirmed} onChange={event=>setConfirmed(event.target.checked)}/>我已核对范围并确认操作</label>
-      <div className="mt-3 flex gap-2"><button type="button" className={button} disabled={busy||!confirmed||preview.pending_jobs>0} onClick={commit}>{preview.type==='export'?'确认下载':preview.excluded?'确认排除':'确认恢复'}</button><button type="button" className={button} disabled={busy} onClick={()=>{setPreview(null);setConfirmed(false)}}>取消</button></div>
+      <div className="mt-3 flex gap-2"><button type="button" className={button} disabled={busy||!confirmed||preview.pending_jobs>0||(preview.type==='edit'&&!preview.changed)} onClick={commit}>{preview.type==='edit'?'确认接纳修改':preview.type==='export'?'确认下载':preview.excluded?'确认排除':'确认恢复'}</button><button type="button" className={button} disabled={busy} onClick={()=>{setPreview(null);setConfirmed(false)}}>取消</button></div>
     </div>}
   </section>;
 }

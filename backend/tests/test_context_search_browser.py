@@ -127,3 +127,110 @@ def test_actual_library_search_continuation_and_changed_version(tmp_path):
         listener.close()
         store.close()
         assert not thread.is_alive()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_LOCAL_SEARCH_UI") != "1", reason="explicit local browser acceptance")
+def test_actual_owner_edit_preview_confirmation_and_stale_summary(tmp_path):
+    import uvicorn
+    from playwright.sync_api import expect, sync_playwright
+
+    token = "original-owner-edit-fixture-" + "r" * 40
+    store = LibraryStore.initialize(tmp_path / "原创人工编辑页面库")
+    item = store.upsert(
+        {"native_id": "700", "title": "人工编辑原创教程", "body": "来源原文"},
+        kind="saved",
+        scope_id="s_saved",
+    )["item"]
+    store.save_bundle(
+        item["id"],
+        {
+            kind: {"text": "原始" + kind, "processor_version": "fixture"}
+            for kind in ("screen", "summary", "readable")
+        },
+        expected_content_hash=item["content_hash"],
+    )
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    policy = AccessPolicy(
+        origin,
+        [
+            Credential.from_token(
+                "p_edit_owner", token, permissions=frozenset({"collections:read", "ui:view", "ui:manage"})
+            )
+        ],
+    )
+    server = uvicorn.Server(
+        uvicorn.Config(
+            create_app(store.files.root, policy),
+            host="127.0.0.1",
+            port=listener.getsockname()[1],
+            **web_runtime_options(),
+        )
+    )
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=False)
+    errors = []
+    thread.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert server.started
+        with sync_playwright() as playwright:
+            binary = os.environ.get("COLLECTION_CONTEXT_TEST_BROWSER_BINARY")
+            browser = playwright.chromium.launch(
+                headless=True, **({"executable_path": binary} if binary else {})
+            )
+            try:
+                context = browser.new_context(locale="zh-CN")
+                context.route(
+                    "**/*",
+                    lambda route: (
+                        route.continue_() if route.request.url.startswith(origin + "/") else route.abort()
+                    ),
+                )
+                page = context.new_page()
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(origin)
+                page.get_by_label("产品访问口令").fill(token)
+                page.get_by_role("button", name="进入收藏库", exact=True).click()
+                for width in (1365, 412):
+                    previous = store.get(item["id"])["artifacts"]["screen"]
+                    text = f"修正关键词{width} <script>window.untrustedEdit=true</script>"
+                    (store.files.root / previous["path"]).write_text(text, encoding="utf-8")
+                    before = store.snapshot()
+                    page.set_viewport_size({"width": width, "height": 915})
+                    page.goto(origin + "/?ref=" + item["id"])
+                    tools = page.get_by_role("region", name="资料管理", exact=True)
+                    expect(tools).to_be_visible()
+                    tools.get_by_role("button", name="核对外部编辑", exact=True).click()
+                    expect(tools.locator("pre")).to_have_text(text)
+                    expect(tools).to_contain_text("将标为过期：可读内容、内容总结")
+                    confirm = tools.get_by_role("button", name="确认接纳修改", exact=True)
+                    expect(confirm).to_be_disabled()
+                    assert store.snapshot() == before
+                    tools.get_by_role("checkbox").check()
+                    expect(confirm).to_be_enabled()
+                    assert page.evaluate("window.untrustedEdit === undefined")
+                    assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
+                    page.screenshot(path=str(tmp_path / f"owner-edit-preview-{width}.png"), full_page=True)
+                    with page.expect_response(
+                        lambda response: response.url.endswith("/v1/management/library/edit-confirm")
+                    ) as response:
+                        confirm.click()
+                    assert response.value.json()["data"]["model_requests"] == 0
+                    assert store.get(item["id"])["artifacts"]["summary"]["state"] == "stale"
+                    assert store.files.read(previous["path"]).decode() == text
+                    page.goto(origin + "/?ref=" + item["id"])
+                    page.get_by_role("tab", name="画面文字", exact=True).click()
+                    expect(page.locator("#evidence-text")).to_have_text(text)
+                    assert page.evaluate("window.untrustedEdit === undefined")
+                assert not errors
+            finally:
+                browser.close()
+    finally:
+        server.should_exit = True
+        thread.join(timeout=3)
+        listener.close()
+        store.close()
+        assert not thread.is_alive()

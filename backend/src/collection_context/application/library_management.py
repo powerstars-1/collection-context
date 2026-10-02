@@ -214,6 +214,121 @@ class LibraryManagement:
         self.authorize()
         return self._exclusion_preview(self.store.snapshot(), ref, excluded)
 
+    def _edit_preview(self, state: dict[str, Any], ref: str, kind: str) -> tuple[dict[str, Any], bytes]:
+        item = self._item(state, ref)
+        if item["excluded"]:
+            raise ContextError("not_found", "请先恢复已排除资料。")
+        if not isinstance(kind, str) or kind not in ARTIFACT_KINDS:
+            raise ContextError("invalid_artifact", "未知产物类型。")
+        previous = item["artifacts"].get(kind)
+        if previous is None:
+            raise ContextError("artifact_missing", "只能核对已经登记的正文文件。")
+        path = self._artifact_path(item, kind)
+        body = self.store.files.read(path, max_bytes=2_000_000)
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ContextError("invalid_artifact", "修改文件不是有效 UTF-8 文本。") from None
+        if not text.strip() or len(text) > 500_000:
+            raise ContextError("invalid_artifact", "修改正文为空或超过长度上限。")
+        sha = hashlib.sha256(body).hexdigest()
+        dependencies = (
+            {"summary", "readable"}
+            if kind in {"original", "audio", "screen", "image"}
+            else {"readable"}
+            if kind == "summary"
+            else set()
+        )
+        return {
+            "material_ref": ref,
+            "artifact": kind,
+            "title": item["title"],
+            "changed": sha != previous["sha256"],
+            "previous_version": previous["version"],
+            "previous_sha256": previous["sha256"],
+            "edited_sha256": sha,
+            "text_preview": text[:2000],
+            "preview_truncated": len(text) > 2000,
+            "bytes": len(body),
+            "previous_text_available": False,
+            "invalidated_artifacts": sorted(dependencies & item["artifacts"].keys()),
+            "pending_jobs": self._pending_jobs(state),
+            "preview_token": digest([self.store.workspace_id, state["generation"], item, kind, sha]),
+            "source_metadata_changed": False,
+            "model_requests": 0,
+            "accuracy": "owner_edit_not_verified",
+            "automatic_overwrite_allowed": False,
+        }, body
+
+    def preview_edit(self, ref: str, *, artifact: str) -> dict[str, Any]:
+        self.authorize()
+        preview, _ = self._edit_preview(self.store.snapshot(), ref, artifact)
+        self.authorize()
+        return preview
+
+    def accept_edit(self, ref: str, *, artifact: str, preview_token: str, confirmed: bool) -> dict[str, Any]:
+        self.authorize()
+        if confirmed is not True:
+            raise ContextError("confirmation_required", "请先核对修改正文和过期影响，再确认接纳。")
+        accepted: dict[str, Any] = {}
+
+        def check_commit():
+            self.authorize()
+            if self.store.files.read(accepted["path"], max_bytes=2_000_000) != accepted["body"]:
+                raise ContextError("version_changed", "预览后的修改文件又发生变化，请重新核对。")
+
+        def change(state):
+            self.authorize()
+            preview, body = self._edit_preview(state, ref, artifact)
+            if preview_token != preview["preview_token"]:
+                raise ContextError("version_changed", "正文或资料状态已变化，请重新预览。")
+            if preview["pending_jobs"]:
+                raise ContextError("library_busy", "请先完成或取消待处理任务，再接纳人工修改。")
+            if not preview["changed"]:
+                raise ContextError("edit_unchanged", "正文与登记版本一致，不创建重复版本。")
+            item = state["items"][ref]
+            previous = item["artifacts"][artifact]
+            accepted.update(path=previous["path"], body=body)
+            updated = self.store._write_artifacts(
+                item,
+                {
+                    artifact: {
+                        "text": body.decode("utf-8"),
+                        "processor_version": "owner-edit-v1",
+                        "coverage": {
+                            **previous["coverage"],
+                            "accuracy": "owner_edit_not_verified",
+                            "owner_modified": True,
+                        },
+                    }
+                },
+                expected_content_hash=previous["input_hash"],
+            )[artifact]
+            # A correction is not evidence that an obsolete source/media version is current.
+            updated["state"] = previous["state"]
+            updated.pop("prepared_input", None)
+            if "prepared_input" in previous:
+                updated["prepared_input"] = previous["prepared_input"]
+            updated["owner_edit"] = {
+                "previous_version": previous["version"],
+                "previous_sha256": previous["sha256"],
+                "accepted_sha256": preview["edited_sha256"],
+            }
+            for kind in preview["invalidated_artifacts"]:
+                item["artifacts"][kind]["state"] = "stale"
+            self.authorize()
+            return {
+                "material_ref": ref,
+                "artifact": artifact,
+                "version": updated["version"],
+                "invalidated_artifacts": preview["invalidated_artifacts"],
+                "model_requests": 0,
+                "edited_file_preserved": True,
+                "source_metadata_changed": False,
+            }
+
+        return self.store.transact(change, before_commit=check_commit)
+
     def set_exclusion(
         self, ref: str, *, excluded: bool, preview_token: str, confirmed: bool
     ) -> dict[str, Any]:

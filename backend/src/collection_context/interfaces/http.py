@@ -455,13 +455,22 @@ def create_app(
             "exclusion-confirm": {"material_ref", "excluded", "preview_token", "confirmed"},
             "export-preview": {"material_ref", "media_scope"},
             "export": {"material_ref", "media_scope", "preview_token", "confirmed"},
+            "edit-preview": {"material_ref", "artifact"},
+            "edit-confirm": {"material_ref", "artifact", "preview_token", "confirmed"},
         }
         if action not in allowed or set(value) - allowed[action]:
             raise ContextError("invalid_argument", "资料管理只接收指定字段，不接收文件路径。")
-        for key in {"material_ref", "media_scope", "preview_token", "version"} & set(value):
+        for key in {"material_ref", "media_scope", "preview_token", "version", "artifact"} & set(value):
             if not isinstance(value[key], str) or len(value[key]) > 200:
                 raise ContextError("invalid_argument", "引用、范围和版本须为限定长度的文本。")
-        if action in {"exclusion-preview", "exclusion-confirm", "export-preview", "export"}:
+        if action in {
+            "exclusion-preview",
+            "exclusion-confirm",
+            "export-preview",
+            "export",
+            "edit-preview",
+            "edit-confirm",
+        }:
             required = allowed[action] - ({"media_scope"} if action == "export-preview" else set())
             if not required <= set(value):
                 raise ContextError("invalid_argument", "资料管理缺少必要字段。")
@@ -483,6 +492,16 @@ def create_app(
         elif action == "export-preview":
             result = await run_in_threadpool(
                 controller.export_preview, ref, media_scope=value.get("media_scope", "none")
+            )
+        elif action == "edit-preview":
+            result = await run_in_threadpool(controller.preview_edit, ref, artifact=value["artifact"])
+        elif action == "edit-confirm":
+            result = await run_in_threadpool(
+                controller.accept_edit,
+                ref,
+                artifact=value["artifact"],
+                preview_token=value["preview_token"],
+                confirmed=value["confirmed"],
             )
         else:
             archive = await run_in_threadpool(

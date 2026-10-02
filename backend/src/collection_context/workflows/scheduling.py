@@ -149,6 +149,7 @@ class ProcessingSchedule:
                     "model_config_changed",
                     "invalid_extraction_plan",
                     "processor_version_changed",
+                    "owner_edit_conflict",
                     "excluded_material",
                     "not_found",
                 }:

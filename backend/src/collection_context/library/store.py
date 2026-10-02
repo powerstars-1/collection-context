@@ -230,7 +230,12 @@ class LibraryStore:
             self._check_writer(owner)
             return {"upgraded": True, "resumed": resumed, "writer_protocol": WRITER_PROTOCOL}
 
-    def transact(self, mutation: Callable[[dict[str, Any]], Any]) -> Any:
+    def transact(
+        self,
+        mutation: Callable[[dict[str, Any]], Any],
+        *,
+        before_commit: Callable[[], None] | None = None,
+    ) -> Any:
         with self.writer() as owner:
             state = self.snapshot()
             from collection_context.library.index import FileIndex, library_version
@@ -239,7 +244,13 @@ class LibraryStore:
             result = mutation(state)
             self._check_writer(owner)
             state["generation"] += 1
-            self._publish(self.files, state, before_commit=lambda: self._check_writer(owner))
+
+            def check_commit():
+                self._check_writer(owner)
+                if before_commit is not None:
+                    before_commit()
+
+            self._publish(self.files, state, before_commit=check_commit)
             if library_version(state) != before_library_version:
                 try:
                     FileIndex(self).rebuild_committed(state, owner)
@@ -383,36 +394,49 @@ class LibraryStore:
                 raise ContextError("version_changed", "原文已变更，未提交旧输入的产物。", retryable=True)
             if expected_prepared_input is not None and item.get("prepared_input") != expected_prepared_input:
                 raise ContextError("input_superseded", "媒体输入已变化，未提交旧快照的提取结果。")
-            filenames = {
-                "original": "原文",
-                "audio": "音频转写",
-                "screen": "画面文字",
-                "summary": "内容总结",
-                "readable": "可读内容",
-                "image": "图片提取",
-                "user_note": "用户备注",
-            }
-            result = {}
-            for kind, value in artifacts.items():
-                version = "a_" + uuid.uuid4().hex
-                path = f"content-vault/80_附件/抖音/{ref}/{version}/{filenames[kind]}.md"
-                body = value["text"].encode("utf-8")
-                self.files.write(path, body)
-                artifact = {
-                    "kind": kind,
-                    "version": version,
-                    "path": path,
-                    "state": "ready",
-                    "sha256": hashlib.sha256(body).hexdigest(),
-                    "input_hash": expected_content_hash,
-                    "processor_version": value["processor_version"],
-                    "created_at": utc_now(),
-                    "coverage": value.get("coverage") or {"accuracy": "not_verified"},
-                }
-                if kind not in {"original", "user_note"} and item.get("prepared_input"):
-                    artifact["prepared_input"] = item["prepared_input"]
-                item["artifacts"][kind] = artifact
-                result[kind] = artifact
-            return result
+            if any(item["artifacts"].get(kind, {}).get("owner_edit") for kind in artifacts):
+                raise ContextError("owner_edit_conflict", "产物包含已确认的人工修改，未覆盖或重新计费。")
+            return self._write_artifacts(item, artifacts, expected_content_hash=expected_content_hash)
 
         return self.transact(save)
+
+    def _write_artifacts(
+        self,
+        item: dict[str, Any],
+        artifacts: dict[str, dict[str, Any]],
+        *,
+        expected_content_hash: str,
+    ) -> dict[str, Any]:
+        """Internal publication helper; callers must hold the store writer transaction."""
+        ref = item["id"]
+        filenames = {
+            "original": "原文",
+            "audio": "音频转写",
+            "screen": "画面文字",
+            "summary": "内容总结",
+            "readable": "可读内容",
+            "image": "图片提取",
+            "user_note": "用户备注",
+        }
+        result = {}
+        for kind, value in artifacts.items():
+            version = "a_" + uuid.uuid4().hex
+            path = f"content-vault/80_附件/抖音/{ref}/{version}/{filenames[kind]}.md"
+            body = value["text"].encode("utf-8")
+            self.files.write(path, body)
+            artifact = {
+                "kind": kind,
+                "version": version,
+                "path": path,
+                "state": "ready",
+                "sha256": hashlib.sha256(body).hexdigest(),
+                "input_hash": expected_content_hash,
+                "processor_version": value["processor_version"],
+                "created_at": utc_now(),
+                "coverage": value.get("coverage") or {"accuracy": "not_verified"},
+            }
+            if kind not in {"original", "user_note"} and item.get("prepared_input"):
+                artifact["prepared_input"] = item["prepared_input"]
+            item["artifacts"][kind] = artifact
+            result[kind] = artifact
+        return result

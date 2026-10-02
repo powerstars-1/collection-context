@@ -61,6 +61,12 @@ class ExtractionWorkflow:
             raise ContextError("version_changed", "任务的原文输入版本已变化，未重新解释旧任务。")
         if current.get("prepared_input") != context["input_id"]:
             raise ContextError("input_superseded", "资料已登记新的媒体快照，旧任务不能覆盖新输入的产物。")
+        if any(
+            value.get("owner_edit")
+            for kind, value in current["artifacts"].items()
+            if kind in {"audio", "screen", "image", "summary", "readable"}
+        ):
+            raise ContextError("owner_edit_conflict", "资料含已确认的人工修改，未覆盖或提交模型请求。")
         roles = {"vision", "summary"} | ({"audio"} if payload["audio"] else set())
         if not isinstance(context["model_profiles"], dict) or set(context["model_profiles"]) != roles:
             raise ContextError("model_config_missing", "任务模型角色不完整。")
