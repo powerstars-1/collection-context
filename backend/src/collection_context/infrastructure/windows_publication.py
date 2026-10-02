@@ -15,10 +15,12 @@ remain separate requirements.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.file_stream import STREAM_CHUNK_BYTES, validate_stream, verified_chunks
 from collection_context.infrastructure.windows_native import (
     HANDLE,
     I32,
@@ -83,6 +85,37 @@ class WindowsPublication:
         validate_component(component)
         if type(body) is not bytes or type(replace) is not bool:
             raise ContextError("invalid_argument", "文件内容须为字节，覆盖须明确指定。")
+        return self.write_chunks(
+            parent,
+            component,
+            (
+                body[offset : offset + STREAM_CHUNK_BYTES]
+                for offset in range(0, len(body), STREAM_CHUNK_BYTES)
+            ),
+            expected_size=len(body),
+            expected_sha256=hashlib.sha256(body).hexdigest(),
+            replace=replace,
+            _check_attachment=_check_attachment,
+        )
+
+    def write_chunks(
+        self,
+        parent: NativeHandle,
+        component: str,
+        chunks: Iterable[bytes],
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        replace: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+        _check_attachment: Callable[[], None] | None = None,
+    ) -> FileIdentity:
+        validate_component(component)
+        validate_stream(expected_size, expected_sha256, replace)
+        source = verified_chunks(
+            chunks, expected_size=expected_size, expected_sha256=expected_sha256, check_cancel=check_cancel
+        )
+        check_cancel()
         self.native._value(parent)
         if parent.role != "directory":
             raise ContextError("forbidden_path", "发布需要本适配器拥有的目录句柄。")
@@ -106,20 +139,29 @@ class WindowsPublication:
                         raise ContextError("storage_unavailable", "新文件状态或运行身份不能确认。")
                     self.native.require_private_security(stage)
                     dlls = self.native._libraries()
-                    offset = 0
-                    while offset < len(body):
-                        chunk = body[offset : offset + 65_536]
-                        buffer, count = ctypes.create_string_buffer(chunk), U32()
-                        if not dlls.kernel32.WriteFile(
-                            HANDLE(self.native._value(stage)), buffer, len(chunk), ctypes.byref(count), None
-                        ) or not 0 < count.value <= len(chunk):
-                            raise ContextError("storage_unavailable", "新文件写入结果不能确认。")
-                        offset += count.value
+                    for chunk in source:
+                        offset = 0
+                        while offset < len(chunk):
+                            check_cancel()
+                            remaining = chunk[offset:]
+                            buffer, count = ctypes.create_string_buffer(remaining), U32()
+                            if not dlls.kernel32.WriteFile(
+                                HANDLE(self.native._value(stage)),
+                                buffer,
+                                len(remaining),
+                                ctypes.byref(count),
+                                None,
+                            ) or not 0 < count.value <= len(remaining):
+                                raise ContextError("storage_unavailable", "新文件写入结果不能确认。")
+                            offset += count.value
                     # Exclusive FILE_CREATE starts at exact empty EOF; no truncate
                     # or seek into an existing file is needed, including empty body.
                     if not dlls.kernel32.FlushFileBuffers(HANDLE(self.native._value(stage))):
                         raise ContextError("storage_unavailable", "新文件落盘结果不能确认。")
-                    if self.native.read_file(stage, max_bytes=len(body), private=True) != body:
+                    if (
+                        self.native.file_digest(stage, expected_size=expected_size, check_cancel=check_cancel)
+                        != expected_sha256
+                    ):
                         raise ContextError("storage_unavailable", "新文件写后核对不符。")
                     self.native.require_private_security(parent)
                     if security.current_user() != descriptor.user:
@@ -128,6 +170,7 @@ class WindowsPublication:
                     self.native.information(parent)
                     if _check_attachment is not None:
                         _check_attachment()
+                    check_cancel()
                     encoded = component.encode("utf-16-le")
                     # The documented minimum includes sizeof(struct), not just
                     # the filename offset. Extra bytes are zeroed, not a path.
@@ -163,7 +206,12 @@ class WindowsPublication:
                     with self.native.open_relative(parent, component, role="read_file") as result:
                         if self.native.information(result) != published:
                             raise ContextError("version_changed", "提交后的文件身份或版本变化。")
-                        if self.native.read_file(result, max_bytes=len(body), private=True) != body:
+                        if (
+                            self.native.file_digest(
+                                result, expected_size=expected_size, check_cancel=check_cancel
+                            )
+                            != expected_sha256
+                        ):
                             raise ContextError("version_changed", "提交后的文件内容变化。")
                         self.native.require_private_security(parent)
                         if _check_attachment is not None:
@@ -172,7 +220,18 @@ class WindowsPublication:
             except BaseException as error:
                 if not isinstance(error, Exception):
                     raise
-                if not submitted and isinstance(error, ContextError) and error.code == "write_conflict":
+                if (
+                    not submitted
+                    and isinstance(error, ContextError)
+                    and error.code
+                    in {
+                        "write_conflict",
+                        "file_stream_integrity",
+                        "runtime_install_cancelled",
+                        "runtime_download_integrity",
+                        "runtime_download_failed",
+                    }
+                ):
                     raise
                 raise ContextError(
                     "storage_unavailable",

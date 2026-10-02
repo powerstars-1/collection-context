@@ -177,3 +177,91 @@ def test_deadline_during_stream_closes_connection(tmp_path, monkeypatch):
     with pytest.raises(ContextError) as caught:
         invoke(tmp_path, client, expected_bytes=8)
     assert caught.value.code == "runtime_download_failed" and not reads and opened[0].closed
+
+
+@pytest.mark.parametrize("failure", ["consumer_error", "break", "cancel"])
+def test_chunk_scope_owns_and_closes_connection_after_early_sink_exit(monkeypatch, failure):
+    client, opened, requests, _ = transport(monkeypatch, [{"body": b"a" * 70_000}])
+    try:
+        with streams.download_chunks(
+            client, "https://cdn.example/a", expected_bytes=70_000, check_cancel=lambda: None
+        ) as chunks:
+            assert len(next(chunks)) == 65_536
+            if failure == "consumer_error":
+                raise OSError("synthetic sink failure")
+            if failure == "cancel":
+                raise ContextError("runtime_install_cancelled", "cancelled")
+    except (OSError, ContextError):
+        pass
+    assert len(opened) == len(requests) == 1 and opened[0].closed
+    assert list(chunks) == []
+
+
+def test_unused_chunk_scope_makes_no_network_or_file_requests(monkeypatch):
+    client, opened, requests, _ = transport(monkeypatch, [])
+    with streams.download_chunks(
+        client, "https://cdn.example/a", expected_bytes=8, check_cancel=lambda: None
+    ):
+        pass
+    assert not opened and not requests
+
+
+@pytest.mark.parametrize(
+    "size,timeout", [(True, 1), (0, 1), (8, True), (8, float("nan")), (8, 601), (8, "10")]
+)
+def test_chunk_arguments_rejected_before_connection(monkeypatch, size, timeout):
+    client, opened, _, _ = transport(monkeypatch, [])
+    with pytest.raises(ContextError) as caught:
+        with streams.download_chunks(
+            client, "https://cdn.example/a", expected_bytes=size, timeout=timeout, check_cancel=lambda: None
+        ):
+            pytest.fail("invalid scope")
+    assert caught.value.code == "runtime_download_limit" and not opened
+
+
+def test_business_large_download_uses_only_file_facade(monkeypatch, tmp_path):
+    body = b"synthetic archive"
+    selected = plan(body)
+    _, opened, _, _ = transport(monkeypatch, [{"body": body}])
+    monkeypatch.setattr(downloads, "BUFFERED_DOWNLOAD_LIMIT", 1)
+    from collection_context.infrastructure.files import SafeFiles
+
+    class Facade:
+        def __init__(self, root):
+            self.tree = SafeFiles(root)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.tree.close()
+
+        def write_chunks(self, *args, **kwargs):
+            return self.tree.write_chunks(*args, **kwargs)
+
+        @property
+        def fd(self):
+            pytest.fail("business caller accessed POSIX fd")
+
+    monkeypatch.setattr(downloads, "SafeFiles", Facade)
+    with downloads.RuntimeDownloads(tmp_path, catalog={selected.id: selected}) as source:
+        assert source(selected).read_bytes() == body
+    assert opened[0].closed and not list(tmp_path.iterdir())
+
+
+def test_business_sink_failure_closes_network_without_publishing(monkeypatch, tmp_path):
+    selected = plan(b"x" * 70_000)
+    _, opened, _, _ = transport(monkeypatch, [{"body": b"x" * 70_000}])
+    monkeypatch.setattr(downloads, "BUFFERED_DOWNLOAD_LIMIT", 1)
+
+    def failed_sink(self, relative, chunks, **kwargs):
+        next(chunks)
+        raise ContextError("storage_unavailable", "controlled failure")
+
+    monkeypatch.setattr(downloads.SafeFiles, "write_chunks", failed_sink)
+    with downloads.RuntimeDownloads(tmp_path, catalog={selected.id: selected}) as source:
+        with pytest.raises(ContextError) as caught:
+            source(selected)
+        assert caught.value.code == "storage_unavailable"
+        assert opened[0].closed and not list(tmp_path.rglob("artifact"))
+    assert not list(tmp_path.iterdir())

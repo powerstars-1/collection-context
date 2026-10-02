@@ -11,10 +11,11 @@ public platform gate intentionally remains closed.
 from __future__ import annotations
 
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.file_stream import validate_stream
 from collection_context.infrastructure.windows_deletion import WindowsDeletion
 from collection_context.infrastructure.windows_native import MAX_NATIVE_READ, NativeHandle, WindowsNative
 from collection_context.infrastructure.windows_publication import WindowsPublication
@@ -171,3 +172,34 @@ class WindowsFiles:
     def unlink(self, relative: str) -> None:
         with self._parent(relative) as (parent, component):
             self._deletion.unlink(parent, component, check_attachment=self.check_root)
+
+    def write_chunks(
+        self,
+        relative: str,
+        chunks: Iterable[bytes],
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        replace: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> None:
+        validate_stream(expected_size, expected_sha256, replace)
+        if not callable(check_cancel):
+            raise ContextError("invalid_argument", "分块取消检查无效。")
+        try:
+            source = iter(chunks)
+        except TypeError:
+            raise ContextError("invalid_argument", "分块来源无效。") from None
+        check_cancel()
+        self.require_private_root()
+        with self._parent(relative, create=True) as (parent, component):
+            self._publication.write_chunks(
+                parent,
+                component,
+                source,
+                expected_size=expected_size,
+                expected_sha256=expected_sha256,
+                replace=replace,
+                check_cancel=check_cancel,
+                _check_attachment=self.require_private_root,
+            )

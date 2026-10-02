@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 import uuid
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.file_stream import STREAM_CHUNK_BYTES, validate_stream, verified_chunks
 from collection_context.infrastructure.platform_safety import require_safe_files_runtime
 
 
@@ -237,6 +240,124 @@ class SafeFiles:
                 # target but cleanup was interrupted, nlink remains >1 and
                 # SafeFiles.read fails closed until an operator repairs it.
                 pass
+            os.close(parent)
+
+    def write_chunks(
+        self,
+        relative: str,
+        chunks: Iterable[bytes],
+        *,
+        expected_size: int,
+        expected_sha256: str,
+        replace: bool = False,
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> None:
+        """Private runtime scopes only; verify bounded input and disk readback before publication."""
+        validate_stream(expected_size, expected_sha256, replace)
+        source = verified_chunks(
+            chunks, expected_size=expected_size, expected_sha256=expected_sha256, check_cancel=check_cancel
+        )
+        check_cancel()
+        self.require_private_root()
+        parent, name = self._parent(relative, create=True)
+        temp = ".tmp-" + uuid.uuid4().hex
+        stage_identity: tuple[int, int] | None = None
+
+        def check_parent() -> None:
+            self.require_private_root()
+            pinned = os.fstat(parent)
+            if pinned.st_uid != os.getuid() or pinned.st_mode & 0o077:
+                raise ContextError("unsafe_secret_permissions", "分块暂存父目录须为当前用户的私有目录。")
+            current_parent, _ = self._parent(relative)
+            try:
+                current = os.fstat(current_parent)
+                if (current.st_dev, current.st_ino, current.st_uid, current.st_mode) != (
+                    pinned.st_dev,
+                    pinned.st_ino,
+                    pinned.st_uid,
+                    pinned.st_mode,
+                ):
+                    raise ContextError("version_changed", "分块暂存父目录路径或权限变化；未确认发布。")
+            finally:
+                os.close(current_parent)
+
+        try:
+            check_parent()
+            fd = os.open(temp, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+            with os.fdopen(fd, "w+b") as stream:
+                initial = os.fstat(stream.fileno())
+                stage_identity = (initial.st_dev, initial.st_ino)
+                total = 0
+                for chunk in source:
+                    check_cancel()
+                    if stream.write(chunk) != len(chunk):
+                        raise ContextError("storage_unavailable", "分块暂存写入未完成。")
+                    total += len(chunk)
+                stream.flush()
+                os.fsync(stream.fileno())
+                before = os.fstat(stream.fileno())
+                if (
+                    not stat.S_ISREG(before.st_mode)
+                    or before.st_nlink != 1
+                    or before.st_uid != os.getuid()
+                    or stat.S_IMODE(before.st_mode) != 0o600
+                    or before.st_size != total
+                    or total != expected_size
+                ):
+                    raise ContextError("file_stream_integrity", "暂存文件身份、权限或大小不符。")
+                stream.seek(0)
+                read_total, digest = 0, hashlib.sha256()
+                while True:
+                    check_cancel()
+                    chunk = stream.read(min(STREAM_CHUNK_BYTES, expected_size + 1 - read_total))
+                    if not chunk:
+                        break
+                    read_total += len(chunk)
+                    if read_total > expected_size:
+                        raise ContextError("file_stream_integrity", "暂存文件在核对期间增长。")
+                    digest.update(chunk)
+                after = os.fstat(stream.fileno())
+                fields = (
+                    "st_dev",
+                    "st_ino",
+                    "st_uid",
+                    "st_mode",
+                    "st_nlink",
+                    "st_size",
+                    "st_mtime_ns",
+                    "st_ctime_ns",
+                )
+                current = os.stat(temp, dir_fd=parent, follow_symlinks=False)
+                if (
+                    read_total != expected_size
+                    or digest.hexdigest() != expected_sha256
+                    or tuple(getattr(before, field) for field in fields)
+                    != tuple(getattr(after, field) for field in fields)
+                    or tuple(getattr(after, field) for field in fields)
+                    != tuple(getattr(current, field) for field in fields)
+                ):
+                    raise ContextError("file_stream_integrity", "暂存文件回读内容或版本不符；未发布。")
+                check_parent()
+                check_cancel()
+                if replace:
+                    os.replace(temp, name, src_dir_fd=parent, dst_dir_fd=parent)
+                else:
+                    os.link(temp, name, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+                    os.unlink(temp, dir_fd=parent)
+                os.fsync(parent)
+                check_parent()
+        except FileExistsError:
+            raise ContextError("write_conflict", "目标已存在，未覆盖原文件。") from None
+        except OSError:
+            raise ContextError("storage_unavailable", "分块写入或提交结果不能确认；不自动重试。") from None
+        finally:
+            if stage_identity is not None:
+                try:
+                    current = os.stat(temp, dir_fd=parent, follow_symlinks=False)
+                    if stat.S_ISREG(current.st_mode) and (current.st_dev, current.st_ino) == stage_identity:
+                        os.unlink(temp, dir_fd=parent)
+                except OSError:
+                    pass
             os.close(parent)
 
     def unlink(self, relative: str) -> None:

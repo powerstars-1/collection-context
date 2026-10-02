@@ -31,6 +31,7 @@ facade, root reattachment checks, atomic writes, or recovery.
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import platform
 import re
@@ -663,17 +664,57 @@ class WindowsNative:
         Private reads explicitly require the ACL adapter both before and after
         reading. An unchecked read is never inferred to be a private-file proof.
         """
-        # Default matches SafeFiles; callers can explicitly read larger runtime
-        # archives/weights. Buffers remain chunked; do not silently cap at 16 MB.
+        body = bytearray()
+        self._consume_file(handle, max_bytes=max_bytes, private=private, consume=body.extend)
+        return bytes(body)
+
+    def file_digest(
+        self, handle: NativeHandle, *, expected_size: int, check_cancel: Callable[[], None] = lambda: None
+    ) -> str:
+        """Private archive readback; keep only a SHA state, not the entire file.
+
+        Cancellation is cooperative between synchronous native reads. It cannot
+        interrupt a blocking device read. Lease/observer handles are not archive
+        consumers and do not acquire this new capability.
+        """
+        from collection_context.infrastructure.file_stream import MAX_STREAM_BYTES
+
+        if type(expected_size) is not int or not 0 <= expected_size <= MAX_STREAM_BYTES:
+            raise ContextError("invalid_argument", "分块回读大小无效。")
+        self._value(handle)
+        if handle.role not in {"read_file", "publication_file"}:
+            raise ContextError("forbidden_path", "分块回读只允许归档文件角色。")
+        digest = hashlib.sha256()
+        count = self._consume_file(
+            handle, max_bytes=expected_size, private=True, consume=digest.update, check_cancel=check_cancel
+        )
+        if count != expected_size:
+            raise ContextError("file_stream_integrity", "分块回读未达到固定大小。")
+        return digest.hexdigest()
+
+    def _consume_file(
+        self,
+        handle: NativeHandle,
+        *,
+        max_bytes: int,
+        private: bool,
+        consume: Callable[[bytes], object],
+        check_cancel: Callable[[], None] = lambda: None,
+    ) -> int:
+        # One primitive for buffered reads and bounded hash-only readback; keep
+        # every role, version and ACL guard shared rather than duplicating IO.
         if type(max_bytes) is not int or not 0 <= max_bytes <= (1 << 63) - 2:
             raise ContextError("invalid_argument", "原生读取大小上限无效。")
         if type(private) is not bool:
             raise ContextError("invalid_argument", "原生读取权限标志无效。")
+        if not callable(check_cancel):
+            raise ContextError("invalid_argument", "分块回读取消检查无效。")
         self._value(handle)
         if handle.role not in {"read_file", "lease_file", "lease_observer", "publication_file"}:
             raise ContextError("forbidden_path", "只允许读取固定文件角色的句柄。")
         limit = min(max_bytes, 65_536) if handle.role in {"lease_file", "lease_observer"} else max_bytes
         with handle._io_lock:
+            check_cancel()
             before = self.information(handle)
             if before.size > limit:
                 raise ContextError("forbidden_path", "文件超过受控读取大小。")
@@ -685,9 +726,10 @@ class WindowsNative:
                 raise ContextError("storage_unavailable", "原生文件位置无法确认。")
             if position.value != 0:
                 raise ContextError("storage_unavailable", "原生文件位置不符合读取边界。")
-            body = bytearray()
-            while len(body) <= limit:
-                capacity = min(_READ_CHUNK, limit + 1 - len(body))
+            total = 0
+            while total <= limit:
+                check_cancel()
+                capacity = min(_READ_CHUNK, limit + 1 - total)
                 buffer, count = ctypes.create_string_buffer(capacity), U32()
                 success = dlls.kernel32.ReadFile(
                     HANDLE(self._value(handle)), buffer, capacity, ctypes.byref(count), None
@@ -700,15 +742,18 @@ class WindowsNative:
                     raise ContextError("storage_unavailable", "原生读取长度不符合缓冲区边界。")
                 if count.value == 0:
                     break
-                body.extend(buffer.raw[: count.value])
-                if len(body) > limit:
+                total += count.value
+                if total > limit:
                     raise ContextError("version_changed", "读取时文件超过原大小范围。", retryable=True)
+                consume(buffer.raw[: count.value])
+                check_cancel()
             after = self.information(handle)
-            if before != after or len(body) != before.size:
+            if before != after or total != before.size:
                 raise ContextError("version_changed", "读取时文件版本或长度发生变化。", retryable=True)
             if private:
                 self.require_private_security(handle)
-            return bytes(body)
+            check_cancel()
+            return total
 
     def try_lock(self, handle: NativeHandle, *, exclusive: bool) -> NativeLock:
         self._value(handle)

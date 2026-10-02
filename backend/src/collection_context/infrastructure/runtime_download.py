@@ -10,7 +10,6 @@ misrepresented as immediate cancellation of an outstanding socket read.
 from __future__ import annotations
 
 import hashlib
-import os
 import tempfile
 import threading
 from collections.abc import Mapping
@@ -35,7 +34,7 @@ from collection_context.infrastructure.runtime_ocr_layout import (
     OCR_SHA256,
     bundled_ocr_archive,
 )
-from collection_context.infrastructure.runtime_stream import download_into
+from collection_context.infrastructure.runtime_stream import download_chunks
 
 DOWNLOAD_HOSTS = frozenset(
     {"cdn.playwright.dev", "playwright.download.prss.microsoft.com", "storage.googleapis.com"}
@@ -117,18 +116,23 @@ class RuntimeDownloads:
         self._temporary.append(temporary)
         root = Path(temporary.name)
         with SafeFiles(root) as files:
-            fd = os.open(
-                "artifact", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=files.fd
-            )
             try:
-                size, digest = download_into(
-                    transport, plan.source_url, fd, expected_bytes=plan.bytes, check_cancel=self._check_stop
-                )
-                files.check_root()
-            finally:
-                os.close(fd)
-        if size != plan.bytes or digest != plan.sha256:
-            raise ContextError("runtime_download_integrity", "下载内容与固定清单不符；未安装。")
+                with download_chunks(
+                    transport, plan.source_url, expected_bytes=plan.bytes, check_cancel=self._check_stop
+                ) as chunks:
+                    files.write_chunks(
+                        "artifact",
+                        chunks,
+                        expected_size=plan.bytes,
+                        expected_sha256=plan.sha256,
+                        check_cancel=self._check_stop,
+                    )
+            except ContextError as error:
+                if error.code == "file_stream_integrity":
+                    raise ContextError(
+                        "runtime_download_integrity", "下载内容与固定清单不符；未安装。"
+                    ) from None
+                raise
         self._check_stop()
         return root / "artifact"
 
