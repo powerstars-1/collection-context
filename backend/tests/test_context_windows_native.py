@@ -421,6 +421,7 @@ def test_unicode_backing_is_utf16_and_root_relative_no_reparse_contract(dlls):
         ("lease_file", 0x40120081, 3, 0x00200060),
         ("lease_observer", 0x80120081, 3, 0x00200060),
         ("metadata", 0x00120080, 3, 0x00200020),
+        ("delete_file", 0x00130080, 0, 0x00200060),
     ],
 )
 def test_roles_cannot_supply_arbitrary_masks_or_creation_flags(dlls, role, access, shares, options):

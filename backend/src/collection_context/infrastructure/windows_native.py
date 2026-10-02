@@ -116,10 +116,12 @@ class Overlapped(ctypes.Structure):
     _fields_ = [("Internal", U64), ("InternalHigh", U64), ("Position", _OffsetUnion), ("hEvent", HANDLE)]
 
 
-Role = Literal["directory", "read_file", "lease_file", "lease_observer", "publication_file", "metadata"]
+Role = Literal[
+    "directory", "read_file", "lease_file", "lease_observer", "publication_file", "metadata", "delete_file"
+]
 # Publication handles can only originate in exclusive private creation. They
 # cannot be requested by open_relative for an arbitrary existing file.
-_ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer", "metadata"})
+_ROLES = frozenset({"directory", "read_file", "lease_file", "lease_observer", "metadata", "delete_file"})
 _OBJ_CASE_INSENSITIVE = 0x40
 _OBJ_DONT_REPARSE = 0x1000
 _FILE_OPEN_REPARSE_POINT = 0x00200000
@@ -538,7 +540,7 @@ class WindowsNative:
             None,
         )
         access = _SYNCHRONIZE | _READ_CONTROL | _FILE_READ_ATTRIBUTES
-        if role != "metadata":
+        if role not in {"metadata", "delete_file"}:
             access |= 0x20 if role == "directory" else 0x1  # TRAVERSE / READ_DATA
         if role in {"lease_file", "publication_file"}:
             # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
@@ -548,6 +550,8 @@ class WindowsNative:
             # LockFileEx requires GENERIC_READ or GENERIC_WRITE. Observers
             # obtain only GENERIC_READ, never metadata-write/delete authority.
             access |= 0x80000000
+        if role == "delete_file":
+            access |= 0x10000  # DELETE plus metadata only; no body read/write.
         if role == "publication_file":
             if _creation is None or parent is None:
                 raise ContextError("forbidden_path", "发布句柄只能由私有排他创建获得。")
@@ -561,6 +565,7 @@ class WindowsNative:
             "lease_observer": 3,
             "publication_file": 0,
             "metadata": 3,
+            "delete_file": 0,
         }[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT
         if role != "metadata":

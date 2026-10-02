@@ -74,7 +74,7 @@ def test_missing_read_does_not_create_directories_or_stage(files):
 @pytest.mark.parametrize(
     "relative", ["", "/a", "a/", "a//b", "a/../b", "a/CON", "a\\b", "x:stream", "a/xx.", None]
 )
-@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "entry_exists", "file_size"])
+@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "entry_exists", "file_size", "unlink"])
 def test_invalid_paths_have_no_native_side_effects(files, relative, operation):
     dlls, tree = files
     before = len(dlls.opened)

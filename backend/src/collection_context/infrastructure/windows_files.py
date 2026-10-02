@@ -4,7 +4,7 @@ Own the root HANDLE and every traversed ancestor; no pathlib IO, CWD/PATH
 resolution, follow-links fallback, or integer POSIX descriptor impersonation.
 Root reopens compare native volume/file identities. All writes check attachment
 before staging, before native publication and after verification. Still missing
-deletion, kernel-lease/consumer migration and actual Windows acceptance; the
+kernel-lease/consumer migration and actual Windows acceptance; the
 public platform gate intentionally remains closed.
 """
 
@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.windows_deletion import WindowsDeletion
 from collection_context.infrastructure.windows_native import MAX_NATIVE_READ, NativeHandle, WindowsNative
 from collection_context.infrastructure.windows_publication import WindowsPublication
 
@@ -27,6 +28,7 @@ class WindowsFiles:
         self.handle = self.native.open_root_directory(root)
         self.identity = self.handle.identity
         self._publication = WindowsPublication(self.native)
+        self._deletion = WindowsDeletion(self.native)
 
     @staticmethod
     def parts(relative: str) -> list[str]:
@@ -165,3 +167,7 @@ class WindowsFiles:
             self._publication.write(
                 parent, component, data, replace=replace, _check_attachment=self.check_root
             )
+
+    def unlink(self, relative: str) -> None:
+        with self._parent(relative) as (parent, component):
+            self._deletion.unlink(parent, component, check_attachment=self.check_root)

@@ -99,6 +99,9 @@ class FileSecrets:
         self._check()
         try:
             self.files.unlink(self._ref(ref))
+        except ContextError as error:
+            if error.code != "not_found":
+                raise
         except FileNotFoundError:
             pass
         except OSError:
