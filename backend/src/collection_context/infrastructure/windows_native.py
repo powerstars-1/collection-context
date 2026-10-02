@@ -5,7 +5,8 @@ Existing lease metadata can be written under its own exclusive range lock; this
 is not atomic library publication. No creation, installation, arbitrary access
 masks, or fallback path IO are provided. DLLs load lazily on
 real Windows x64; ``_dlls`` injection is for call/layout tests, never acceptance.
-Private ACL validation remains explicitly unsupported.
+Private ACL checks are a separate lazy adapter; neither draft selects Windows
+as an accepted public backend.
 
 Native contracts (original implementation; no copied external implementation):
 https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntcreatefile
@@ -22,7 +23,7 @@ https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-erref/596a1078-
 
 The caller owns sequencing: handles are not transferable between adapters or
 to subprocesses. This draft does not implement a complete race-safe path
-facade, root reattachment checks, private ACL checks, atomic writes, or recovery.
+facade, root reattachment checks, atomic writes, or recovery.
 """
 
 from __future__ import annotations
@@ -34,9 +35,12 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from collection_context.application.contracts import ContextError
+
+if TYPE_CHECKING:
+    from collection_context.infrastructure.windows_security import WindowsPrivateSecurity
 
 # Windows LLP64, including UTF-16 WCHAR, regardless of the test host's C ABI.
 U16 = ctypes.c_uint16
@@ -327,6 +331,7 @@ class WindowsNative:
     def __init__(self, *, _dlls: _DLLs | None = None):
         self._dlls = _dlls
         self._bound = False
+        self._security: WindowsPrivateSecurity | None = None
 
     def _libraries(self) -> _DLLs:
         _check_layout()
@@ -526,15 +531,20 @@ class WindowsNative:
             raise ContextError("lock_changed", "原生文件句柄身份发生变化。")
         return result
 
-    def read_file(self, handle: NativeHandle, *, max_bytes: int = MAX_NATIVE_READ) -> bytes:
+    def read_file(
+        self, handle: NativeHandle, *, max_bytes: int = MAX_NATIVE_READ, private: bool = False
+    ) -> bytes:
         """Bounded synchronous read from an owned file HANDLE, never path fallback.
 
         Serialize rewind/read/close on this handle. Do not promise an IO deadline
         or cancellation: a native synchronous read can wait for the OS/device.
-        This is not private-file authorization; that requires the ACL adapter.
+        Private reads explicitly require the ACL adapter both before and after
+        reading. An unchecked read is never inferred to be a private-file proof.
         """
         if type(max_bytes) is not int or not 0 <= max_bytes <= MAX_NATIVE_READ:
             raise ContextError("invalid_argument", "原生读取大小上限无效。")
+        if type(private) is not bool:
+            raise ContextError("invalid_argument", "原生读取权限标志无效。")
         self._value(handle)
         if handle.role not in {"read_file", "lease_file", "lease_observer"}:
             raise ContextError("forbidden_path", "只允许读取固定文件角色的句柄。")
@@ -543,6 +553,8 @@ class WindowsNative:
             before = self.information(handle)
             if before.size > limit:
                 raise ContextError("forbidden_path", "文件超过受控读取大小。")
+            if private:
+                self.require_private_security(handle)
             dlls = self._libraries()
             value, position = HANDLE(self._value(handle)), I64(-1)
             if not dlls.kernel32.SetFilePointerEx(value, I64(0), ctypes.byref(position), 0):
@@ -570,6 +582,8 @@ class WindowsNative:
             after = self.information(handle)
             if before != after or len(body) != before.size:
                 raise ContextError("version_changed", "读取时文件版本或长度发生变化。", retryable=True)
+            if private:
+                self.require_private_security(handle)
             return bytes(body)
 
     def try_lock(self, handle: NativeHandle, *, exclusive: bool) -> NativeLock:
@@ -677,6 +691,8 @@ class WindowsNative:
 
     def require_private_security(self, handle: NativeHandle) -> None:
         self._value(handle)
-        # READ_CONTROL access does not establish safe ownership/DACL. The next
-        # adapter batch must implement and natively verify those checks.
-        raise _unsupported()
+        if self._security is None:
+            from collection_context.infrastructure.windows_security import WindowsPrivateSecurity
+
+            self._security = WindowsPrivateSecurity(self)
+        self._security.require_private(handle)
