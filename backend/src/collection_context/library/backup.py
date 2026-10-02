@@ -24,6 +24,7 @@ from collection_context.application.contracts import (
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.ownership import ExecutorLease
 from collection_context.library.index import FileIndex
+from collection_context.library.legacy_references import validate_legacy_references
 from collection_context.library.store import LEGACY_GUARD, WRITER_PROTOCOL, LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 
@@ -121,6 +122,7 @@ def _collect_files(
     store: LibraryStore, state: dict[str, Any], *, include_media: bool
 ) -> tuple[dict[str, bytes], list[dict[str, Any]], list[dict[str, str]], dict[str, str]]:
     files: dict[str, bytes] = {}
+    validate_legacy_references(state)
     omitted: list[dict[str, Any]] = []
     entry_gaps: list[dict[str, str]] = []
     generated_entries = FileIndex(store).generated_entries()
@@ -397,6 +399,7 @@ def _validate_references(
     expected: set[str] = set()
     readable_paths: set[str] = set()
     try:
+        validate_legacy_references(state)
         for ref, item in state["items"].items():
             if valid_id(ref) != item.get("id"):
                 raise ValueError

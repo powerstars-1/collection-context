@@ -68,6 +68,11 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("init", help="只初始化新空目录，不覆盖已有文件")
     commands.add_parser("upgrade-writer", help="显式升级早期开发库写锁；保留资料，不自动清除旧占用")
     commands.add_parser("rebuild-index", help="显式重建派生索引，不调用模型")
+    legacy = commands.add_parser("bind-legacy-ref", help="库主人预览并关联旧m1引用，不读取或迁移旧库")
+    legacy.add_argument("--legacy-ref", required=True)
+    legacy.add_argument("--ref", required=True, help="已入库的稳定资料引用；需人工核对同一作品")
+    legacy.add_argument("--preview-token", help="先预览；再次携带返回的标识并确认")
+    legacy.add_argument("--confirm-binding", action="store_true", help="明确确认只创建这一个引用映射")
     access = commands.add_parser("access-key", help="本地建立产品访问口令；仅在本终端显示一次，不是模型 Key")
     access.add_argument("--name", required=True)
     access.add_argument("--ui", action="store_true", help="同时允许登录页面；不授予处理或计费权限")
@@ -302,6 +307,16 @@ def main(argv: list[str] | None = None) -> int:
                 data = store.upgrade_writer()
             elif args.command == "rebuild-index":
                 data = FileIndex(store).rebuild()
+            elif args.command == "bind-legacy-ref":
+                from collection_context.library.legacy_references import LegacyReferences
+
+                aliases = LegacyReferences(store)
+                if args.confirm_binding:
+                    data = aliases.bind(args.legacy_ref, args.ref, preview_token=args.preview_token)
+                elif args.preview_token is not None:
+                    raise ContextError("confirmation_required", "携带预览标识仍须明确确认映射。")
+                else:
+                    data = aliases.preview(args.legacy_ref, args.ref)
             elif args.command == "submit-link":
                 from collection_context.workflows.addition import AdditionWorkflow
 

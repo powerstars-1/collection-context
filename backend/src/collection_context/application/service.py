@@ -22,6 +22,7 @@ from collection_context.library.index import (
     normalize,
     original_text,
 )
+from collection_context.library.legacy_references import resolve_reference
 from collection_context.library.store import LibraryStore
 
 
@@ -129,7 +130,7 @@ class ContextService:
 
     @staticmethod
     def _item(state: dict[str, Any], ref: str) -> dict[str, Any]:
-        item = state["items"].get(valid_id(ref))
+        item = state["items"].get(resolve_reference(state, ref))
         if item is None or item["excluded"]:
             raise ContextError("not_found", "资料不存在或已排除。")
         return item

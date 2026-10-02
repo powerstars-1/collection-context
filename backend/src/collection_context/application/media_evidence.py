@@ -34,7 +34,7 @@ class MediaEvidence:
             raise ContextError("artifact_missing", "尚未准备原图或关键帧；查看画面不会自动下载或调用模型。")
         payload = self.inputs.manifest(identity)
         if (
-            payload["material_ref"] != ref
+            payload["material_ref"] != item["id"]
             or payload["content_hash"] != item["content_hash"]
             or payload["kind"] != item["media_type"]
         ):
@@ -43,6 +43,7 @@ class MediaEvidence:
 
     def listing(self, ref: str) -> dict[str, Any]:
         item, payload = self._current(ref)
+        ref = item["id"]
         identity = item["prepared_input"]
         return {
             "material_ref": ref,
@@ -74,7 +75,7 @@ class MediaEvidence:
         blob = frame["blob"]
         if type(blob["bytes"]) is not int or not 0 < blob["bytes"] <= MAX_IMAGE_BYTES:
             raise ContextError("media_input_limit", "图片超过本页读取上限，请在本机查看原文件。")
-        data = self.inputs._read_blob(ref, blob)
+        data = self.inputs._read_blob(item["id"], blob)
         mime = raster_mime(data)
         if mime != blob["mime_type"]:
             raise ContextError("unsupported_media", "图片实际格式与登记类型不一致。")
