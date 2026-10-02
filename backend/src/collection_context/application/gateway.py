@@ -17,7 +17,7 @@ class ReadGateway:
     def dispatch(self, action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
             fields = {
-                "search_collections": ({"query"}, {"query", "limit", "filters"}),
+                "search_collections": ({"query"}, {"query", "limit", "filters", "offset", "version"}),
                 "read_collection": (
                     {"material_ref"},
                     {"material_ref", "artifact", "offset", "max_chars", "version"},

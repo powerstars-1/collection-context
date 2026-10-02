@@ -120,3 +120,11 @@ test("runtime API access is centralized and direct model calls cannot bypass it"
     assert.doesNotMatch(source, /\bfetch\s*\(|\bXMLHttpRequest\b|\bnavigator\.sendBeacon\s*\(/, path);
   }
 });
+
+test("library search and list share version-bound continuation without hiding search pages", () => {
+  const source = read("src/Library.jsx");
+  assert.match(source, /append&&listing\?\{offset:listing\.next_offset,version:listing\.version\}/);
+  assert.match(source, /\{listing\?\.next_offset!=null && <button/);
+  assert.doesNotMatch(source, /!committedQuery&&listing\?\.next_offset/);
+  assert.match(source, /if\(revision!==epoch\.current\)return/);
+});

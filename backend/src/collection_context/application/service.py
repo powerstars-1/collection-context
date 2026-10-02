@@ -226,8 +226,25 @@ class ContextService:
             ),
         }
 
-    def search(self, query: str, *, limit: int = 3, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+        filters: dict[str, Any] | None = None,
+        offset: int = 0,
+        version: str | None = None,
+    ) -> dict[str, Any]:
         bounded_integer(limit, "limit", 1, 20)
+        bounded_integer(offset, "offset", 0, 100_000)
+        if version is not None and (
+            type(version) is not str
+            or len(version) != 64
+            or any(c not in "0123456789abcdef" for c in version)
+        ):
+            raise ContextError("invalid_argument", "搜索版本须为上一页返回的受控版本。")
+        if offset and version is None:
+            raise ContextError("version_required", "继续搜索须携带上一页version与next_offset。")
         if not isinstance(query, str) or not query.strip() or len(query) > 500 or "\x00" in query:
             raise ContextError("invalid_argument", "请输入不超过 500 字符的搜索词。")
         terms = list(dict.fromkeys(normalize(query).split()))
@@ -280,11 +297,34 @@ class ContextService:
                 )
             )
         matches.sort(key=lambda row: (-row[0], row[1]))
+        # Bind the query/filter and revalidated candidate set, not job progress
+        # or a particular page size. External artifact edits can change matches
+        # without a manifest commit; their integrity gaps must invalidate pages.
+        current_version = digest(
+            {
+                "library_version": index["library_version"],
+                "query_terms": sorted(terms),
+                "filters": filters,
+                "matches": [(row[0], row[1]) for row in matches],
+                "integrity_gaps": index["gaps"] + integrity_gaps,
+            }
+        )
+        if version is not None and version != current_version:
+            raise ContextError(
+                "version_changed", "搜索结果或条件已变化，请从第一页重新搜索。", retryable=True
+            )
+        if offset > len(matches):
+            raise ContextError("invalid_argument", "搜索位置超过结果范围。")
+        rows = [row[2] for row in matches[offset : offset + limit]]
+        next_offset = offset + len(rows) if offset + len(rows) < len(matches) else None
         return {
             "query": query,
-            "items": [row[2] for row in matches[:limit]],
+            "items": rows,
             "total_matches": len(matches),
-            "has_more": len(matches) > limit,
+            "has_more": next_offset is not None,
+            "offset": offset,
+            "next_offset": next_offset,
+            "version": current_version,
             "library_version": index["library_version"],
             "scope_coverage": scope_coverage(state),
             "integrity_gaps": index["gaps"] + integrity_gaps,

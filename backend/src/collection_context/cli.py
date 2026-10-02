@@ -82,6 +82,8 @@ def parser() -> argparse.ArgumentParser:
     search = commands.add_parser("search", help="关键词检索已有资料，不同步、不提取")
     search.add_argument("--query", required=True)
     search.add_argument("--limit", type=int, default=3)
+    search.add_argument("--offset", type=int, default=0)
+    search.add_argument("--version", help="继续搜索时携带上一页version")
     search.add_argument("--source-kind", action="append", dest="source_kinds")
     search.add_argument("--scope-id")
     search.add_argument("--since")
@@ -335,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
                     for key in ("source_kinds", "scope_id", "since", "until", "time_basis")
                     if getattr(args, key) is not None
                 }
-                data = service.search(args.query, limit=args.limit, filters=filters)
+                data = service.search(
+                    args.query, limit=args.limit, filters=filters, offset=args.offset, version=args.version
+                )
             elif args.command == "read":
                 data = service.read(
                     args.ref,

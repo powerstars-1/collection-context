@@ -93,7 +93,8 @@ export function Library({api,download,canManage=false,sourceKind=''}) {
     const filters = sourceKind ? {source_kinds:[sourceKind]}:{};
     try {
       const data = await api(committedQuery?'/v1/collections/search':'/v1/collections/list',
-        {limit:20,filters,...(committedQuery?{query:committedQuery}:append&&listing?{offset:listing.next_offset,version:listing.version}:{})});
+        {limit:20,filters,...(committedQuery?{query:committedQuery}:{}),
+          ...(append&&listing?{offset:listing.next_offset,version:listing.version}:{})});
       if(revision!==epoch.current)return;
       setItems(old=>append?[...old,...data.items]:data.items);setListing(data);
     } catch(err) {if(revision===epoch.current)setError(err.message)}
@@ -124,7 +125,7 @@ export function Library({api,download,canManage=false,sourceKind=''}) {
       {busy && <p role="status" className="rounded-2xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">正在读取资料…</p>}
       {!busy&&!items.length&&!error && <div className="rounded-2xl border border-dashed border-zinc-200 bg-white p-4 text-sm text-zinc-500">当前范围没有资料。换一个关键词，或先去同步页添加作品。</div>}
       <MaterialList materials={materials} selectedIds={selectedId?[selectedId]:[]} onToggle={setSelectedId}/>
-      {!committedQuery&&listing?.next_offset!=null && <button type="button" className={button} disabled={busy} onClick={()=>load(true)}>继续查看</button>}
+      {listing?.next_offset!=null && <button type="button" className={button} disabled={busy} onClick={()=>load(true)}>继续查看</button>}
       {canManage&&<ExcludedItems api={api} download={download} onChanged={()=>load()}/>}
       {canManage&&<LibrarySpace api={api}/>}
     </div>}
