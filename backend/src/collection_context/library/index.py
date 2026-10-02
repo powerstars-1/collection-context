@@ -96,6 +96,23 @@ def original_text(item: dict[str, Any]) -> str:
     return "\n\n".join(part for part in (item["title"], item["body"]) if part)
 
 
+def accepted_entry(store: LibraryStore, item: dict[str, Any], body: bytes) -> bool:
+    """An owner-confirmed entry is preserved, never parsed into platform metadata."""
+    note = item["artifacts"].get("user_note", {})
+    sha = note.get("coverage", {}).get("entry_card_snapshot_sha256")
+    if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha) or not note.get("owner_edit"):
+        return False
+    if hashlib.sha256(body).hexdigest() != sha:
+        return False
+    if not is_current(item, note):
+        return False
+    try:
+        artifact_bytes(store, item, "user_note")
+    except ContextError:
+        return False
+    return True
+
+
 def is_current(item: dict[str, Any], artifact: dict[str, Any]) -> bool:
     try:
         sources = source_refs(artifact)
@@ -242,7 +259,11 @@ class FileIndex:
             else:
                 tracked_hash = previous_entries.get(entry_path)
                 current_hash = hashlib.sha256(current).hexdigest()
-                if tracked_hash is None:
+                if accepted_entry(self.store, item, current):
+                    # Deliberately NOT generated ownership. A deleted index must
+                    # not allow regeneration to replace the confirmed user's page.
+                    pass
+                elif tracked_hash is None:
                     gaps.append(
                         {
                             "material_ref": ref,

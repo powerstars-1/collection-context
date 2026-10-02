@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from collection_context.interfaces.http import create_app
 from collection_context.interfaces.security import AccessPolicy, Credential
+from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
 
 OWNER = "owner_fixture_" + "o" * 40
@@ -64,6 +65,43 @@ def test_owner_export_confirmation_download_and_no_paths(client):
     assert b".context/" not in download.content
     payload["confirmed"] = False
     assert not web.post(PREFIX + "export", json=payload, headers=headers).json()["ok"]
+
+
+def test_owner_entry_edit_is_note_not_source_metadata_and_requires_cookie_csrf(client):
+    web, store, ref, headers, _ = client
+    before = store.get(ref)
+    path = FileIndex.readable_path(ref)
+    text = "# 用户修改的标题\n\n入口关键词：蓝莓独角兽\n<script>not-executable</script>"
+    (store.files.root / path).write_text(text, encoding="utf-8")
+    payload = {"material_ref": ref, "artifact": "entry"}
+    assert web.post(PREFIX + "edit-preview", json=payload).status_code == 403
+    assert (
+        web.post(
+            PREFIX + "edit-preview", json=payload, headers={"Authorization": "Bearer " + OWNER}
+        ).status_code
+        == 403
+    )
+    assert (
+        web.post(
+            PREFIX + "edit-preview", json={**payload, "path": "/etc/passwd"}, headers=headers
+        ).status_code
+        == 400
+    )
+    preview = web.post(PREFIX + "edit-preview", json=payload, headers=headers).json()["data"]
+    assert preview["effect"] == "append_entry_snapshot_to_user_note" and preview["text_preview"] == text
+    result = web.post(
+        PREFIX + "edit-confirm",
+        json={**payload, "preview_token": preview["preview_token"], "confirmed": True},
+        headers=headers,
+    )
+    assert result.json()["ok"] and result.json()["data"]["model_requests"] == 0
+    assert store.get(ref)["title"] == before["title"]
+    assert store.get(ref)["body"] == before["body"]
+    read = web.post(
+        "/v1/collections/read", json={"material_ref": ref, "artifact": "user_note"}, headers=headers
+    ).json()["data"]["text"]
+    assert text in read and "用户备注，不是平台原文" in read
+    assert store.files.read(path).decode() == text
 
 
 def test_exclusion_restore_read_visibility_immediately(client):

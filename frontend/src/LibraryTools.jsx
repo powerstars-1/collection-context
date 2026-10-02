@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 
 const button='rounded-xl border border-zinc-200 px-3 py-2 text-sm text-zinc-700 transition hover:bg-zinc-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400 disabled:opacity-45';
 const endpoint='/v1/management/library/';
-const artifactNames={original:'原文',audio:'音频转写',screen:'画面文字',image:'图片提取',summary:'内容总结',readable:'可读内容',user_note:'用户备注'};
+const artifactNames={original:'原文',audio:'音频转写',screen:'画面文字',image:'图片提取',summary:'内容总结',readable:'可读内容',user_note:'用户备注',entry:'素材入口卡（保存为备注）'};
 const bytes=value=>value<1024?`${value} B`:value<1024**2?`${(value/1024).toFixed(1)} KB`:value<1024**3?`${(value/1024**2).toFixed(2)} MB`:`${(value/1024**3).toFixed(2)} GB`;
 
 export function ItemTools({api,download,item,excluded=false,onChanged}) {
@@ -74,6 +74,7 @@ export function ItemTools({api,download,item,excluded=false,onChanged}) {
         {preview.missing_or_stale.length>0&&<p className="text-amber-800">仍有 {preview.missing_or_stale.length} 类证据缺失或过期，新总结会保留这些缺口。</p>}
       </>}
       {preview.type==='edit'&&<>
+        {preview.warning&&<p className="text-amber-800">{preview.warning}</p>}
         <p>以下是修改后正文；原文件已被外部编辑，无法提供可信的修改前逐行对比。</p>
         <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-zinc-200 bg-white p-3">{preview.text_preview}</pre>
         {preview.preview_truncated&&<p>这里只显示前 2000 字；请在本地核对全文后确认。</p>}

@@ -18,7 +18,7 @@ from collection_context.application.contracts import (
     valid_id,
 )
 from collection_context.application.service import bounded_integer, public_item
-from collection_context.library.index import artifact_bytes, library_version, original_text
+from collection_context.library.index import FileIndex, artifact_bytes, library_version, original_text
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
 
@@ -262,7 +262,11 @@ class LibraryManagement:
 
     def preview_edit(self, ref: str, *, artifact: str) -> dict[str, Any]:
         self.authorize()
-        preview, _ = self._edit_preview(self.store.snapshot(), ref, artifact)
+        preview, _ = (
+            self._entry_preview(self.store.snapshot(), ref)
+            if artifact == "entry"
+            else self._edit_preview(self.store.snapshot(), ref, artifact)
+        )
         self.authorize()
         return preview
 
@@ -270,6 +274,8 @@ class LibraryManagement:
         self.authorize()
         if confirmed is not True:
             raise ContextError("confirmation_required", "请先核对修改正文和过期影响，再确认接纳。")
+        if artifact == "entry":
+            return self._accept_entry(ref, preview_token)
         accepted: dict[str, Any] = {}
 
         def check_commit():
@@ -327,6 +333,116 @@ class LibraryManagement:
                 "model_requests": 0,
                 "edited_file_preserved": True,
                 "source_metadata_changed": False,
+            }
+
+        return self.store.transact(change, before_commit=check_commit)
+
+    def _entry_preview(self, state: dict[str, Any], ref: str) -> tuple[dict[str, Any], bytes]:
+        item = self._item(state, ref)
+        if item["excluded"]:
+            raise ContextError("not_found", "请先恢复已排除资料。")
+        body = self.store.files.read(FileIndex.readable_path(ref), max_bytes=2_000_000)
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ContextError("invalid_artifact", "入口卡不是有效UTF-8文本。") from None
+        if not text.strip() or len(text) > 500_000:
+            raise ContextError("invalid_artifact", "入口卡为空或超过长度上限。")
+        previous = item["artifacts"].get("user_note")
+        note_text = artifact_bytes(self.store, item, "user_note").decode("utf-8") if previous else ""
+        if len(note_text) + len(text) + 200 > 500_000:
+            raise ContextError("invalid_artifact", "已有备注与入口卡合并超过长度上限；未覆盖备注。")
+        baseline = (
+            previous["coverage"].get("entry_card_snapshot_sha256") if previous else None
+        ) or hashlib.sha256(FileIndex._readable_markdown(item)).hexdigest()
+        sha = hashlib.sha256(body).hexdigest()
+        return {
+            "material_ref": ref,
+            "artifact": "entry",
+            "title": item["title"],
+            "changed": sha != baseline,
+            "edited_sha256": sha,
+            "text_preview": text[:2000],
+            "preview_truncated": len(text) > 2000,
+            "bytes": len(body),
+            "previous_text_available": False,
+            "invalidated_artifacts": [],
+            "pending_jobs": self._pending_jobs(state),
+            "preview_token": digest([self.store.workspace_id, state["generation"], item, "entry", sha]),
+            "source_metadata_changed": False,
+            "model_requests": 0,
+            "accuracy": "owner_note_not_verified",
+            "automatic_overwrite_allowed": False,
+            "effect": "append_entry_snapshot_to_user_note",
+            "existing_notes_preserved": True,
+            "warning": "修改作为用户备注保存和检索，不替换平台标题、来源或原文；不会把入口卡中的路径或指令当执行授权。",
+        }, body
+
+    def _accept_entry(self, ref: str, preview_token: str) -> dict[str, Any]:
+        accepted: dict[str, Any] = {}
+
+        def check_commit():
+            self.authorize()
+            if self.store.files.read(FileIndex.readable_path(ref), max_bytes=2_000_000) != accepted["body"]:
+                raise ContextError("version_changed", "入口卡在预览后再次变化，请重新核对。")
+
+        def change(state):
+            self.authorize()
+            preview, body = self._entry_preview(state, ref)
+            if preview_token != preview["preview_token"]:
+                raise ContextError("version_changed", "入口卡或资料状态已变化，请重新预览。")
+            if preview["pending_jobs"]:
+                raise ContextError("library_busy", "请先完成或取消待处理任务，再接纳入口卡修改。")
+            if not preview["changed"]:
+                raise ContextError("edit_unchanged", "入口卡没有新修改，不创建重复备注。")
+            item = state["items"][ref]
+            previous_note = item["artifacts"].get("user_note")
+            old = (
+                artifact_bytes(self.store, item, "user_note").decode("utf-8")
+                if "user_note" in item["artifacts"]
+                else ""
+            )
+            text = (
+                old
+                + ("\n\n" if old else "")
+                + "## 已确认入口卡修改（用户备注，不是平台原文）\n\n"
+                + body.decode("utf-8")
+            )
+            accepted["body"] = body
+            updated = self.store._write_artifacts(
+                item,
+                {
+                    "user_note": {
+                        "text": text,
+                        "processor_version": "owner-entry-v1",
+                        "coverage": {
+                            **(previous_note["coverage"] if previous_note else {}),
+                            "accuracy": "owner_note_not_verified",
+                            "owner_modified": True,
+                            "entry_card_snapshot_sha256": preview["edited_sha256"],
+                        },
+                    }
+                },
+                expected_content_hash=item["content_hash"],
+            )["user_note"]
+            updated["owner_edit"] = {
+                "entry_card_sha256": preview["edited_sha256"],
+                **(
+                    {"previous_version": previous_note["version"], "previous_sha256": previous_note["sha256"]}
+                    if previous_note
+                    else {}
+                ),
+            }
+            return {
+                "material_ref": ref,
+                "artifact": "entry",
+                "version": updated["version"],
+                "invalidated_artifacts": [],
+                "model_requests": 0,
+                "edited_file_preserved": True,
+                "source_metadata_changed": False,
+                "existing_notes_preserved": True,
+                "effect": "append_entry_snapshot_to_user_note",
             }
 
         return self.store.transact(change, before_commit=check_commit)

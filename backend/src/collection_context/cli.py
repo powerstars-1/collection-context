@@ -73,11 +73,13 @@ def parser() -> argparse.ArgumentParser:
     legacy.add_argument("--ref", required=True, help="已入库的稳定资料引用；需人工核对同一作品")
     legacy.add_argument("--preview-token", help="先预览；再次携带返回的标识并确认")
     legacy.add_argument("--confirm-binding", action="store_true", help="明确确认只创建这一个引用映射")
-    edits = commands.add_parser("accept-edit", help="库主人核对外部编辑的已登记Markdown，不调用模型")
+    edits = commands.add_parser("accept-edit", help="库主人核对正文或素材入口卡的外部编辑，不调用模型")
     edits.add_argument("--ref", required=True)
-    edits.add_argument("--artifact", required=True, choices=ARTIFACT_KINDS)
+    edits.add_argument("--artifact", required=True, choices=(*ARTIFACT_KINDS, "entry"))
     edits.add_argument("--preview-token", help="先预览；确认时携带预览标识")
-    edits.add_argument("--confirm-edit", action="store_true", help="明确接纳正文并使依赖结果过期")
+    edits.add_argument(
+        "--confirm-edit", action="store_true", help="接纳预览修改；入口卡保存为备注，正文依赖按预览过期"
+    )
     summary = commands.add_parser("refresh-summary", help="预览并确认仅从已保存正文更新总结；不重跑音视频")
     summary.add_argument("--ref", required=True)
     summary.add_argument("--preview-token")

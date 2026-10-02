@@ -233,6 +233,38 @@ def test_actual_owner_edit_preview_confirmation_and_stale_summary(tmp_path):
                     page.get_by_role("tab", name="画面文字", exact=True).click()
                     expect(page.locator("#evidence-text")).to_have_text(text)
                     assert page.evaluate("window.untrustedEdit === undefined")
+                from collection_context.library.index import FileIndex
+
+                for width in (1365, 412):
+                    entry_path = FileIndex.readable_path(item["id"])
+                    text = f"入口笔记{width} <script>window.entryExecuted=true</script>"
+                    (store.files.root / entry_path).write_text(text, encoding="utf-8")
+                    before = store.snapshot()
+                    page.set_viewport_size({"width": width, "height": 915})
+                    page.goto(origin + "/?ref=" + item["id"])
+                    tools = page.get_by_role("region", name="资料管理", exact=True)
+                    tools.get_by_label("核对正文类型").select_option("entry")
+                    tools.get_by_role("button", name="核对外部编辑", exact=True).click()
+                    expect(tools.locator("pre")).to_have_text(text)
+                    expect(tools).to_contain_text("修改作为用户备注保存和检索，不替换平台标题、来源或原文")
+                    confirm = tools.get_by_role("button", name="确认接纳修改", exact=True)
+                    expect(confirm).to_be_disabled()
+                    assert store.snapshot() == before
+                    tools.get_by_role("checkbox").check()
+                    expect(confirm).to_be_enabled()
+                    page.screenshot(path=str(tmp_path / f"owner-entry-preview-{width}.png"), full_page=True)
+                    assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
+                    with page.expect_response(
+                        lambda response: response.url.endswith("/v1/management/library/edit-confirm")
+                    ) as response:
+                        confirm.click()
+                    assert response.value.json()["data"]["existing_notes_preserved"]
+                    assert store.get(item["id"])["title"] == item["title"]
+                    assert store.files.read(entry_path).decode() == text
+                    page.goto(origin + "/?ref=" + item["id"])
+                    page.get_by_role("tab", name="备注", exact=True).click()
+                    expect(page.locator("#evidence-text")).to_contain_text(text)
+                    assert page.evaluate("window.entryExecuted === undefined")
                 page.get_by_role("button", name="仅更新总结", exact=True).click()
                 tools = page.get_by_role("region", name="资料管理", exact=True)
                 expect(tools).to_contain_text("最多 1 次总结请求，金额未知")

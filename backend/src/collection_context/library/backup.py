@@ -23,7 +23,7 @@ from collection_context.application.contracts import (
 )
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.ownership import ExecutorLease
-from collection_context.library.index import FileIndex, source_refs
+from collection_context.library.index import FileIndex, accepted_entry, source_refs
 from collection_context.library.legacy_references import validate_legacy_references
 from collection_context.library.store import LEGACY_GUARD, WRITER_PROTOCOL, LibraryStore
 from collection_context.processing.inputs import PreparedInputs
@@ -146,7 +146,11 @@ def _collect_files(
             )
         else:
             tracked = generated_entries.get(entry_path)
-            if tracked is None:
+            if accepted_entry(store, item, entry_body):
+                # Restored entry ownership comes from the confirmed note, not
+                # from claiming it is a regeneratable machine page.
+                pass
+            elif tracked is None:
                 entry_gaps.append(
                     {
                         "material_ref": ref,
