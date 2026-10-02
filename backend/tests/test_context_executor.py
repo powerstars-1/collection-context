@@ -180,17 +180,23 @@ def test_result_confirmed_before_stage_checkpoint_can_resume_without_fee(store, 
     executor = DurableExecutor(store)
     stages = [stage(paid=True)]
     job = executor.submit(stages, idempotency_key="commit-gap", max_calls=1)
-    commit = executor.jobs.commit_stage_result
+    commit = executor.jobs.commit_call_result
 
     def crash(*args, **kwargs):
+        # Retain recovery coverage for libraries written by the older two-commit
+        # protocol: confirmed paid output but no stage checkpoint. The new normal
+        # executor coalesces them; explicitly construct that old persisted gap.
+        kwargs["complete_stage"] = False
+        commit(*args, **kwargs)
         raise KeyboardInterrupt("Simulated process termination, not a recoverable provider exception")
 
-    monkeypatch.setattr(executor.jobs, "commit_stage_result", crash)
+    monkeypatch.setattr(executor.jobs, "commit_call_result", crash)
     with pytest.raises(KeyboardInterrupt):
         executor.run(job["id"], stages)
     original = executor.jobs.get(job["id"])
     assert original["state"] == "running" and original["calls"][0]["state"] == "completed"
-    monkeypatch.setattr(executor.jobs, "commit_stage_result", commit)
+    assert original["stages"]["audio"]["state"] == "running"
+    monkeypatch.setattr(executor.jobs, "commit_call_result", commit)
     no_dispatch = [
         dataclasses.replace(stages[0], invoke=lambda deps: pytest.fail("Confirmed output must be reused"))
     ]

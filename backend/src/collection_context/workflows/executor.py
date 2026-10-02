@@ -195,24 +195,40 @@ class DurableExecutor:
                     principal=principal,
                 )
                 return {"status": "failed", "error": preflight_error.as_dict()}
-        self.jobs.set_stage(
-            ref, stage.name, state_name="running", input_hash=actual_input, principal=principal
-        )
         call = None
         if stage.paid:
             # Commit intent/budget before reaching model code, then check cancellation again.
-            call = self.jobs.begin_call(
-                ref,
-                stage=stage.name,
-                input_hash=actual_input,
-                processor_version=stage.processor_version,
-                principal=principal,
-            )
+            try:
+                call = self.jobs.begin_call(
+                    ref,
+                    stage=stage.name,
+                    input_hash=actual_input,
+                    processor_version=stage.processor_version,
+                    principal=principal,
+                    start_stage=True,
+                )
+            except ContextError as intent_error:
+                if intent_error.code == "budget_required":
+                    # Preserve a visible blocked stage without ever publishing
+                    # a fictitious running stage or unbudgeted paid intent.
+                    self.jobs.set_stage(
+                        ref,
+                        stage.name,
+                        state_name="blocked",
+                        input_hash=actual_input,
+                        error=intent_error,
+                        principal=principal,
+                    )
+                raise
             try:
                 self._check(ref, lease, principal)
             except ContextError:
                 self.jobs.finish_call(ref, call["id"], outcome="not_dispatched", principal=principal)
                 raise
+        else:
+            self.jobs.set_stage(
+                ref, stage.name, state_name="running", input_hash=actual_input, principal=principal
+            )
         try:
             outcome = stage.invoke(copy.deepcopy(dependencies))
             if not isinstance(outcome, StageOutcome):
@@ -249,10 +265,19 @@ class DurableExecutor:
                 principal=principal,
             )
             return {"status": "failed", "error": error.as_dict()}
-        descriptor = None
         if call is not None:
             # Cancellation during a cloud request retains the late result and actual usage.
-            descriptor = self.jobs.commit_call_result(ref, call["id"], result, principal=principal)
+            # Paid result, usage and stage checkpoint share one durable commit.
+            try:
+                self._check(ref, lease, principal)
+            except ContextError:
+                # Loss of execution authority must not publish a ready stage,
+                # but a known late paid result still needs its original ledger.
+                self.jobs.commit_call_result(ref, call["id"], result, principal=principal)
+                raise
+            self.jobs.commit_call_result(ref, call["id"], result, principal=principal, complete_stage=True)
+            self._check(ref, lease, principal)
+            return result
         self._check(ref, lease, principal)
         self.jobs.commit_stage_result(
             ref,
@@ -260,7 +285,6 @@ class DurableExecutor:
             input_hash=actual_input,
             signature=signature,
             result=result,
-            descriptor=descriptor,
             principal=principal,
         )
         return result

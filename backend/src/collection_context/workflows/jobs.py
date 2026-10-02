@@ -169,11 +169,20 @@ class JobManager:
         return self.store.transact(change)
 
     def begin_call(
-        self, ref: str, *, stage: str, input_hash: str, processor_version: str, principal: str = "local_owner"
+        self,
+        ref: str,
+        *,
+        stage: str,
+        input_hash: str,
+        processor_version: str,
+        principal: str = "local_owner",
+        start_stage: bool = False,
     ) -> dict[str, Any]:
         """Commit an intent BEFORE dispatch. An unresolved intent never silently retries."""
         valid_id(ref)
         valid_id(stage)
+        if type(start_stage) is not bool:
+            raise ContextError("invalid_argument", "阶段启动策略须为明确布尔值。")
         if (
             not isinstance(input_hash, str)
             or not input_hash
@@ -201,6 +210,9 @@ class JobManager:
                 raise ContextError(
                     "budget_required", "已达到任务调用上限。", next_action="调整此任务额度或结束处理。"
                 )
+            previous_stage = job["stages"].get(stage)
+            if start_stage and previous_stage and previous_stage["input_hash"] != input_hash:
+                raise ContextError("stage_input_changed", "任务阶段输入已固定，不能热切换。")
             call = {
                 "id": "x_" + uuid.uuid4().hex,
                 "signature": signature,
@@ -215,6 +227,16 @@ class JobManager:
                 "elapsed_seconds": None,
             }
             job["calls"].append(call)
+            if start_stage:
+                # The execution marker and paid intent share ONE visibility boundary.
+                # No network invocation occurs until this durable commit returns.
+                job["stages"][stage] = {
+                    "state": "running",
+                    "input_hash": input_hash,
+                    "result": None,
+                    "error": None,
+                    "updated_at": call["created_at"],
+                }
             job["updated_at"] = utc_now()
             return {**call, "reused": False}
 
@@ -378,11 +400,21 @@ class JobManager:
         return self.store.transact(change)
 
     def commit_call_result(
-        self, ref: str, call_id: str, result: dict[str, Any], *, principal: str = "local_owner"
+        self,
+        ref: str,
+        call_id: str,
+        result: dict[str, Any],
+        *,
+        principal: str = "local_owner",
+        complete_stage: bool = False,
     ) -> dict[str, Any]:
         """Text + returned usage become confirmed in ONE manifest commit; an orphan is not success."""
         valid_id(ref)
         valid_id(call_id)
+        if type(complete_stage) is not bool:
+            raise ContextError("invalid_argument", "阶段完成策略须为明确布尔值。")
+        if complete_stage and result.get("status") not in {"ready", "partial", "not_applicable"}:
+            raise ContextError("invalid_stage_result", "阶段结果状态无效；未标记阶段完成。")
         body = canonical_bytes(result)
         if len(body) > 2_000_000:
             raise ContextError(
@@ -397,6 +429,20 @@ class JobManager:
                 raise ContextError("call_state_conflict", "调用不存在或结果已登记，未覆盖。")
             self.store.files.write(path, body)
             descriptor = {"call_id": call_id, "path": path, "sha256": hashlib.sha256(body).hexdigest()}
+            if complete_stage:
+                # Retain the old stage publication's actual file/hash check;
+                # coalescing transactions must not replace it with in-memory data.
+                try:
+                    if self.read_result(descriptor) != result:
+                        raise ContextError("corrupt_call_result", "请求结果与落盘文件不一致。")
+                except ContextError as error:
+                    if error.code != "corrupt_call_result":
+                        raise
+                    raise ContextError(
+                        "corrupt_call_result",
+                        "返回结果回读校验失败；保留调用意图，不标记完成或重发。",
+                        possibly_charged=True,
+                    ) from None
             call.update(
                 state="completed",
                 result=descriptor,
@@ -406,10 +452,31 @@ class JobManager:
                 upstream_request_id=result.get("upstream_request_id"),
                 elapsed_seconds=result.get("elapsed_seconds"),
             )
+            conflict = False
+            if complete_stage and job["state"] == "running" and not job["cancel_requested"]:
+                previous = job["stages"].get(call["stage"])
+                if previous is None or previous["input_hash"] != call["input_hash"]:
+                    # Still retain the paid result/usage even when the stage identity
+                    # no longer agrees. Report this conflict AFTER committing it.
+                    conflict = True
+                else:
+                    job["stages"][call["stage"]] = {
+                        "state": result["status"],
+                        "input_hash": call["input_hash"],
+                        "signature": call["signature"],
+                        "result": descriptor,
+                        "error": None,
+                        "updated_at": call["finished_at"],
+                    }
             job["updated_at"] = utc_now()
-            return descriptor
+            return descriptor, conflict
 
-        return self.store.transact(change)
+        descriptor, conflict = self.store.transact(change)
+        if conflict:
+            raise ContextError(
+                "stage_input_changed", "阶段身份已变化；已保留返回正文与实际用量，未标记完成。"
+            )
+        return descriptor
 
     def read_result(self, descriptor: dict[str, Any]) -> dict[str, Any]:
         try:
