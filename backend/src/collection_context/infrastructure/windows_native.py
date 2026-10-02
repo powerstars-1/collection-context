@@ -487,6 +487,30 @@ class WindowsNative:
                 handle.close()
                 raise
 
+    def create_lease_file(self, parent: NativeHandle, component: str) -> NativeHandle:
+        """Exclusive private bootstrap only; not ownership or metadata write authority."""
+        validate_component(component)
+        self._value(parent)
+        if parent.role != "directory":
+            raise ContextError("forbidden_path", "所有权文件创建需要受控目录句柄。")
+        with parent._io_lock:
+            self.information(parent)
+            self.require_private_security(parent)
+            security = self.private_security()
+            descriptor = security.creation_descriptor(directory=False)
+            handle = self._open(component, parent, "lease_file", _creation=descriptor)
+            try:
+                if security.current_user() != descriptor.user:
+                    raise ContextError("storage_unavailable", "创建所有权文件时运行身份变化。")
+                self.require_private_security(handle)
+                if self.information(handle).size != 0:
+                    raise ContextError("storage_unavailable", "新所有权文件不是空文件。")
+                self.information(parent)
+                return handle
+            except BaseException:
+                handle.close()
+                raise
+
     def open_relative(self, parent: NativeHandle, component: str, *, role: Role) -> NativeHandle:
         validate_component(component)
         self._value(parent)
@@ -519,17 +543,21 @@ class WindowsNative:
             # SetEndOfFile/FlushFileBuffers require GENERIC_WRITE, not just
             # WRITE_DATA. Neither role requests WRITE_DAC; lease has no DELETE.
             access |= 0x40000000
+        if role == "lease_observer":
+            # LockFileEx requires GENERIC_READ or GENERIC_WRITE. Observers
+            # obtain only GENERIC_READ, never metadata-write/delete authority.
+            access |= 0x80000000
         if role == "publication_file":
             if _creation is None or parent is None:
                 raise ContextError("forbidden_path", "发布句柄只能由私有排他创建获得。")
             access |= 0x10000  # DELETE for handle-relative rename, never WRITE_DAC.
-        elif _creation is not None and (role != "directory" or parent is None):
+        elif _creation is not None and (role not in {"directory", "lease_file"} or parent is None):
             raise ContextError("forbidden_path", "创建权限与固定文件角色不匹配。")
         shares = {
             "directory": 3,
             "read_file": 1,
-            "lease_file": 7,
-            "lease_observer": 7,
+            "lease_file": 3,
+            "lease_observer": 3,
             "publication_file": 0,
         }[role]
         options = _FILE_OPEN_REPARSE_POINT | _FILE_SYNCHRONOUS_IO_NONALERT

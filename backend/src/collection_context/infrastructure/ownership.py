@@ -14,6 +14,31 @@ from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.platform_safety import require_ownership_runtime
 
 
+def worker_capabilities(body: bytes) -> dict[str, bool] | None:
+    """Same bounded canonical worker metadata on POSIX and Windows; not liveness."""
+    if type(body) is not bytes or len(body) > 65_536:
+        raise ValueError("invalid worker metadata")
+    value = json.loads(body)
+    if (
+        not isinstance(value, dict)
+        or set(value) not in ({"nonce", "pid"}, {"nonce", "pid", "capabilities"})
+        or not isinstance(value.get("nonce"), str)
+        or re.fullmatch(r"e_[0-9a-f]{32}", value["nonce"]) is None
+        or type(value.get("pid")) is not int
+        or value["pid"] <= 0
+        or canonical_bytes(value) != body
+    ):
+        raise ValueError("invalid worker metadata")
+    capabilities = value.get("capabilities")
+    if "capabilities" in value and (
+        not isinstance(capabilities, dict)
+        or set(capabilities) != {"model_calls", "source_sync"}
+        or any(type(v) is not bool for v in capabilities.values())
+    ):
+        raise ValueError("invalid worker capabilities")
+    return capabilities
+
+
 class _FileLease:
     path: str
     busy: str
@@ -144,7 +169,7 @@ class WorkerLease(_FileLease):
         A busy lease is not a heartbeat or proof of progress. Shared-lock probes are
         nonblocking and immediately released when acquired. No PID/age-based liveness inference.
         """
-        result = {
+        result: dict[str, object] = {
             "online": None,
             "observed_at": utc_now(),
             "evidence": "os_exclusive_lease",
@@ -182,25 +207,7 @@ class WorkerLease(_FileLease):
                 result["online"] = False
                 return result
             body = os.pread(fd, 65_537, 0)
-            value = json.loads(body)
-            if (
-                not isinstance(value, dict)
-                or set(value) not in ({"nonce", "pid"}, {"nonce", "pid", "capabilities"})
-                or not isinstance(value.get("nonce"), str)
-                or re.fullmatch(r"e_[0-9a-f]{32}", value["nonce"]) is None
-                or type(value.get("pid")) is not int
-                or value["pid"] <= 0
-            ):
-                return result
-            if canonical_bytes(value) != body:
-                return result
-            capabilities = value.get("capabilities")
-            if capabilities is not None and (
-                not isinstance(capabilities, dict)
-                or set(capabilities) != {"model_calls", "source_sync"}
-                or any(type(v) is not bool for v in capabilities.values())
-            ):
-                return result
+            capabilities = worker_capabilities(body)
             after = os.fstat(fd)
             path_info = os.stat(name, dir_fd=parent, follow_symlinks=False)
             files.check_root()

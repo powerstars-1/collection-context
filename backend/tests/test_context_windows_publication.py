@@ -107,6 +107,8 @@ class PublicationDLLs(SecurityDLLs):
             assert request.SecurityDescriptor
             if options & 1:
                 assert shares == 3 and not access & 0x40010000
+            elif shares == 3:
+                assert access & 0x40000000 and not access & 0x10000
             else:
                 assert shares == 0 and access & 0x10000 and access & 0x40000000
             sd = ctypes.cast(request.SecurityDescriptor, ctypes.POINTER(security.AbsoluteDescriptor)).contents
