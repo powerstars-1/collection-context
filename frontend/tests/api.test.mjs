@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createApi } from "../src/api.js";
+import { createApi, getAgentSetup } from "../src/api.js";
 
 function installFetch(t, implementation) {
   const original = globalThis.fetch;
@@ -199,4 +199,38 @@ test("queued requests never send after the session changes",async(t)=>{
   api.setSession(null);
   finish[0](response(200,{ok:true,data:{}}));finish[1](response(200,{ok:true,data:{}}));
   await rejected;assert.equal(calls,2);
+});
+
+test("agent setup is exactly one browser-session GET without body, bearer or CSRF",async(t)=>{
+  const calls=[];
+  installFetch(t,async(path,options)=>{calls.push({path,options});return response(200,{ok:true,data:{fixture:true}})});
+  const api=createApi();api.setSession({csrf_token:'never-put-in-setup'});
+  const controller=new AbortController();
+  assert.deepEqual(await getAgentSetup(api.request,{signal:controller.signal}),{fixture:true});
+  assert.equal(calls.length,1);
+  const {path,options}=calls[0];
+  assert.equal(path,'/v1/agent-setup');assert.equal(options.method,'GET');
+  assert.equal(options.credentials,'same-origin');assert.equal(options.body,undefined);
+  assert.equal(options.signal,controller.signal);
+  assert.equal([...new Headers(options.headers)].length,0);
+});
+
+test("agent setup does not create credentials or retry an unauthorized session",async(t)=>{
+  let requests=0,expired=0;
+  installFetch(t,async(path)=>{requests++;assert.equal(path,'/v1/agent-setup');return response(401,{ok:false,error:{message:'expired'}})});
+  const api=createApi(()=>{expired++});
+  await assert.rejects(getAgentSetup(api.request));
+  assert.equal(requests,1);assert.equal(expired,1);
+  await assert.rejects(getAgentSetup(undefined));assert.equal(requests,1);
+});
+
+test("agent setup honors abort and replaced-session rejection",async(t)=>{
+  let finish;
+  installFetch(t,()=>new Promise(resolve=>{finish=resolve}));
+  const api=createApi();api.setSession({csrf_token:'old'});
+  const pending=getAgentSetup(api.request);
+  api.setSession(null);finish(response(200,{ok:true,data:{must_not_render:true}}));
+  await assert.rejects(pending);
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(getAgentSetup(api.request,{signal:controller.signal}),{name:'AbortError'});
 });

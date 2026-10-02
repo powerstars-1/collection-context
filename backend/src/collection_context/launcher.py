@@ -48,6 +48,9 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--no-browser", action="store_true", help="不自动打开浏览器，适合无桌面 Linux")
     result.add_argument("--diagnose", action="store_true", help="只输出脱敏检查报告，不创建或修改资料库")
+    result.add_argument(
+        "--legacy-vault", action="store_true", help="明确只读连接 workspace 指向的旧库；访问配置在库外"
+    )
     return result
 
 
@@ -82,6 +85,7 @@ def _ensure_owner_access(
     output: TextIO,
     *,
     owner_presenter: Callable[[str], bool] | None = None,
+    cancel_owner_access: Callable[[str, str], None] | None = None,
 ) -> None:
     registry = AccessRegistry(store)
     records = registry.records()
@@ -105,7 +109,10 @@ def _ensure_owner_access(
         finally:
             if not accepted:
                 try:
-                    registry.revoke(access["principal"])
+                    if cancel_owner_access is None:
+                        registry.revoke(access["principal"])
+                    else:
+                        cancel_owner_access(access["principal"], access["token"])
                 except BaseException:
                     raise ContextError(
                         "owner_rollback_failed",
@@ -252,27 +259,56 @@ def launch(
     owner_presenter: Callable[[str], bool] | None = None,
     stop_event: threading.Event | None = None,
     capabilities: LauncherCapabilities | None = None,
+    legacy_vault: bool = False,
 ) -> int:
     if stop_event is not None and stop_event.is_set():
         return 0
-    if capabilities is not None:
+    if type(legacy_vault) is not bool or legacy_vault and (initialize_empty or capabilities is not None):
+        raise ContextError("launcher_capabilities_invalid", "旧库只读模式不接受新建资料库或处理能力。")
+    if legacy_vault:
+        from collection_context.application.legacy_desktop import legacy_startup_report
+
+        report = legacy_startup_report(workspace, port)
+        if report["workspace"]["state"] != "legacy_readonly":
+            raise ContextError("workspace_not_usable", "旧库无法只读连接；没有初始化、覆盖或迁移资料。")
+    elif capabilities is not None:
         capabilities.validate()
         if capabilities.workspace != workspace.absolute():
             raise ContextError("launcher_capabilities_invalid", "启动能力必须绑定当前资料库。")
+        report = startup_report(workspace, port)
     else:
         capabilities = LauncherCapabilities(workspace.absolute())
-    report = startup_report(workspace, port)
+        report = startup_report(workspace, port)
     if not report["capabilities"]["ready_for_management_page"]:
         raise ContextError("dependency_required", "管理页依赖未就绪；请安装本产品的 launcher 可选依赖。")
     if not report["listen"]["available"]:
         raise ContextError("port_unavailable", "本机端口不可用，请停止占用进程或通过 --port 选择其他端口。")
 
-    store, created = _prepare_workspace(workspace, initialize_empty=initialize_empty)
+    if legacy_vault:
+        from collection_context.application.legacy_desktop import prepare_legacy_access
+
+        store, created = prepare_legacy_access(workspace)
+    else:
+        store, created = _prepare_workspace(workspace, initialize_empty=initialize_empty)
     with ExitStack() as cleanup:
         cleanup.callback(store.close)
         if created:
-            print(f"已初始化新的产品资料库：{store.files.root}", file=output)
-        _ensure_owner_access(store, output, owner_presenter=owner_presenter)
+            print(
+                "已建立库外独立访问配置；旧库没有复制或迁移。"
+                if legacy_vault
+                else f"已初始化新的产品资料库：{store.files.root}",
+                file=output,
+            )
+        cancel_owner_access = None
+        if legacy_vault:
+            from collection_context.application.legacy_desktop import revoke_legacy_owner_access
+
+            def cancel_owner_access(principal: str, token: str) -> None:
+                revoke_legacy_owner_access(store, principal, token)
+
+        _ensure_owner_access(
+            store, output, owner_presenter=owner_presenter, cancel_owner_access=cancel_owner_access
+        )
         if stop_event is not None and stop_event.is_set():
             print("启动已取消，资料库保持原位。", file=output)
             return 0
@@ -280,15 +316,22 @@ def launch(
         origin = f"http://{LOOPBACK}:{port}"
         policy = AccessPolicy(origin, registry.credentials())
         print("正在加载本机管理页；首次启动可能需要几秒。", file=output)
-        resources = cleanup.enter_context(launcher_resources(capabilities, headless=no_browser))
+        resources = None
+        if not legacy_vault:
+            assert capabilities is not None
+            resources = cleanup.enter_context(launcher_resources(capabilities, headless=no_browser))
         app = create_app(
             store.files.root,
             policy,
             refresh=lambda: registry.refresh(policy),
-            model_secrets=resources.model_secrets,
-            connection_runner=resources.connection_runner,
+            model_secrets=resources.model_secrets if resources is not None else None,
+            connection_runner=resources.connection_runner if resources is not None else None,
+            legacy_vault=workspace if legacy_vault else None,
+            legacy_binding_required=legacy_vault,
         )
-        _attach_execution_lifecycle(app, capabilities)
+        if not legacy_vault:
+            assert capabilities is not None
+            _attach_execution_lifecycle(app, capabilities)
         try:
             import uvicorn
         except ImportError:
@@ -342,9 +385,18 @@ def launch(
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     if args.diagnose:
-        report = startup_report(args.workspace, args.port)
+        if args.legacy_vault:
+            from collection_context.application.legacy_desktop import legacy_startup_report
+
+            report = legacy_startup_report(args.workspace, args.port)
+        else:
+            report = startup_report(args.workspace, args.port)
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))
-        ready = report["capabilities"]["ready_for_management_page"] and report["listen"]["available"]
+        ready = (
+            report["capabilities"]["ready_for_management_page"]
+            and report["listen"]["available"]
+            and (not args.legacy_vault or report["workspace"]["state"] == "legacy_readonly")
+        )
         return 0 if ready else 1
     try:
         return launch(
@@ -353,6 +405,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             initialize_empty=args.initialize_empty,
             no_browser=args.no_browser,
             output=sys.stdout,
+            legacy_vault=args.legacy_vault,
         )
     except ContextError as error:
         print(f"{error.code}: {error.message}", file=sys.stderr)

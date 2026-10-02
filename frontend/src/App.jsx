@@ -87,7 +87,7 @@ export default function App() {
         <SubNav page={navPage} active={sub} onChange={onSub} density={density}/>
         <main id="main-content" className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[linear-gradient(180deg,rgba(255,255,255,0.40),rgba(248,250,252,0.76))]">
           {page==='materials'&&<Library api={client.request} download={client.download} canManage={session.permissions.includes('ui:manage')} sourceKind={kind}/>}
-          {page==='access'&&<div className="min-h-0 flex-1 overflow-y-auto"><Access legacyReadonly={session.library_mode==='legacy_readonly'}/></div>}
+          {page==='access'&&<div className="min-h-0 flex-1 overflow-y-auto"><Access api={client.request} legacyReadonly={session.library_mode==='legacy_readonly'}/></div>}
           <div hidden={page==='materials'||page==='access'} className="min-h-0 flex-1 overflow-y-auto">{session.library_mode==='legacy_readonly'?<div className="m-6 rounded-3xl border border-zinc-200 bg-white p-6"><h2 className="text-lg font-semibold">当前连接旧资料库</h2><p className="mt-3 text-sm leading-7 text-zinc-500">此连接支持浏览、搜索和 AI 读取。旧库没有本产品的同步任务、模型配置或处理记录。</p><a href="/" className="mt-4 inline-block rounded-xl bg-zinc-900 px-4 py-2 text-sm text-white">返回收藏库</a></div>:<LegacyPanels/>}</div>
         </main>
       </div>

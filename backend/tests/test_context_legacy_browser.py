@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import re
 import socket
@@ -159,10 +160,22 @@ def test_actual_legacy_search_read_and_deep_link_are_readonly(tmp_path, width):
                 page.screenshot(path=str(tmp_path / f"legacy-deep-link-{width}.png"), full_page=True)
                 page.goto(origin + "/access")
                 expect(page.get_by_role("heading", name="把收藏交给你的 AI。", exact=True)).to_be_visible()
-                cli_example = page.locator("pre").filter(has_text="collection-context --workspace")
-                expect(cli_example).to_contain_text('--workspace "<旧资料目录路径>" --legacy-vault')
-                mcp_example = page.locator("pre").filter(has_text="collection-context-mcp")
-                expect(mcp_example).to_contain_text('--workspace "<旧资料目录路径>" --legacy-vault')
+                cli_example = page.locator("#agent-cli-examples")
+                mcp_example = page.locator("#agent-mcp-configuration")
+                expect(cli_example).to_be_visible()
+                expect(mcp_example).to_be_visible()
+                examples = json.loads(cli_example.inner_text())
+                assert [item["action"] for item in examples] == ["search", "read", "status"]
+                assert all(
+                    str(root) in item["args"] and "--legacy-vault" in item["args"] for item in examples
+                )
+                assert all(str(authority) not in item["args"] for item in examples)
+                configuration = json.loads(mcp_example.inner_text())["mcpServers"]["collection-context"]
+                assert configuration["args"][-3:] == ["--workspace", str(root), "--legacy-vault"]
+                assert token not in cli_example.inner_text() + mcp_example.inner_text()
+                expect(page.locator("#agent-http-example")).to_contain_text(origin + "/v1/collections/search")
+                expect(page.locator("#agent-http-example")).to_contain_text("<专用只读产品口令>")
+                expect(page.get_by_role("button", name="复制 MCP 配置", exact=True)).to_be_enabled()
                 cli_example.scroll_into_view_if_needed()
                 assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
                 page.screenshot(path=str(tmp_path / f"legacy-access-{width}.png"), full_page=True)
@@ -189,7 +202,7 @@ def test_actual_legacy_search_read_and_deep_link_are_readonly(tmp_path, width):
                 assert all(
                     path in {"/", "/access", "/connect"}
                     or path.startswith("/assets/")
-                    or path == "/v1/session"
+                    or path in {"/v1/session", "/v1/agent-setup"}
                     or path.startswith("/v1/collections/")
                     for path in requested
                 )

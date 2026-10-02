@@ -41,6 +41,12 @@ _SAFE_ERRORS = {
     "owner_presentation_failed": "口令展示失败，本次新权限已撤销。",
     "owner_confirmation_cancelled": "已取消首次口令确认，本次新权限已撤销。",
     "desktop_display_required": "本机窗口不可用；未继续创建后台服务。",
+    "legacy_source_changed": "旧库身份已变化；未连接其他目录，请重新核对资料位置。",
+    "legacy_access_incompatible": "旧库独立访问配置不匹配；没有覆盖或迁移原资料。",
+    "legacy_paths_overlap": "旧库与访问配置目录不能互相包含；没有迁移或覆盖资料。",
+    "legacy_access_conflict": "旧库访问配置正在被其他操作建立；请重新检查后再启动。",
+    "legacy_mode_not_allowed": "此目录属于新产品库，请关闭旧库只读选项后重新启动。",
+    "storage_unavailable": "资料目录不可访问或磁盘已断开；没有初始化或迁移资料。",
 }
 
 
@@ -57,6 +63,7 @@ class DiagnosticParameters:
     port: int
     initialize_empty: bool
     permissions: tuple[bool, bool, bool, bool] = (False, False, False, False)
+    legacy_readonly: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,10 +89,12 @@ class DesktopDiagnostics:
         self,
         *,
         checker: Callable[..., dict[str, Any]] = startup_report,
+        legacy_checker: Callable[..., dict[str, Any]] | None = None,
         options_checker: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.events: queue.Queue[DiagnosticResult] = queue.Queue()
         self._checker = checker
+        self._legacy_checker = legacy_checker
         self._options_checker = options_checker
         self._lock = threading.Lock()
         self._generation = 0
@@ -140,17 +149,23 @@ class DesktopDiagnostics:
             try:
                 # Even home expansion and dependency imports belong off Tk's thread.
                 workspace = Path(parameters.workspace).expanduser()
-                report = self._checker(workspace, parameters.port)
+                checker = self._checker
+                if parameters.legacy_readonly:
+                    from collection_context.application.legacy_desktop import legacy_startup_report
+
+                    checker = self._legacy_checker or legacy_startup_report
+                report = checker(workspace, parameters.port)
             except BaseException:
                 # Never retain or render filesystem/model/OS exception details.
                 pass
             try:
-                checker = self._options_checker
-                if checker is None:
-                    from collection_context.application.runtime_setup import runtime_options
+                if not parameters.legacy_readonly:
+                    options_checker = self._options_checker
+                    if options_checker is None:
+                        from collection_context.application.runtime_setup import runtime_options
 
-                    checker = runtime_options
-                options = checker()
+                        options_checker = runtime_options
+                    options = options_checker()
             except BaseException:
                 # Catalog inspection is independent from management-page readiness.
                 pass
@@ -346,6 +361,7 @@ class DesktopController:
         port: int,
         initialize_empty: bool,
         desktop_permissions: tuple[bool, bool, bool, bool] | None = None,
+        legacy_readonly: bool = False,
     ) -> None:
         if self.active:
             raise ContextError("desktop_already_running", "请先停止当前服务。")
@@ -357,6 +373,14 @@ class DesktopController:
             or any(type(flag) is not bool for flag in desktop_permissions)
         ):
             raise ContextError("launcher_capabilities_invalid", "请选择明确的启动能力。")
+        if (
+            type(legacy_readonly) is not bool
+            or legacy_readonly
+            and (initialize_empty or desktop_permissions is not None and any(desktop_permissions))
+        ):
+            raise ContextError(
+                "launcher_capabilities_invalid", "旧库只读模式不能新建库、配置模型或执行任务。"
+            )
         if not self._operation_lock.acquire(blocking=False):
             raise ContextError("desktop_operation_busy", "请先等待组件安装结束或停止当前服务。")
         self.stop_event = threading.Event()
@@ -364,7 +388,7 @@ class DesktopController:
         try:
             self._worker = threading.Thread(
                 target=self._run,
-                args=(workspace, port, initialize_empty, desktop_permissions),
+                args=(workspace, port, initialize_empty, desktop_permissions, legacy_readonly),
                 name="collection-context-desktop-service",
                 daemon=False,
             )
@@ -433,6 +457,7 @@ class DesktopController:
         port: int,
         initialize_empty: bool,
         desktop_permissions: tuple[bool, bool, bool, bool] | None,
+        legacy_readonly: bool = False,
     ) -> None:
         try:
             service = self._launch_service
@@ -441,7 +466,9 @@ class DesktopController:
 
                 service = launch
             options: dict[str, Any] = {}
-            if desktop_permissions is not None:
+            if legacy_readonly:
+                options["legacy_vault"] = True
+            elif desktop_permissions is not None:
                 from collection_context.application.launcher_capabilities import default_desktop_capabilities
 
                 # Path checks may wait for OS permission: never perform these on Tk.
@@ -616,6 +643,14 @@ class _DesktopWindow:
                 frame, text="同意建立新的空资料库（不覆盖非空目录）", variable=self.initialize
             )
             self.init_check.pack(anchor="w", pady=8)
+            self.legacy_readonly = tk.BooleanVar(master=self.root, value=False)
+            self.legacy_check = ttk.Checkbutton(
+                frame,
+                text="只读连接已有 Markdown / Obsidian 旧库（不复制、不迁移）",
+                variable=self.legacy_readonly,
+                command=self._legacy_mode_changed,
+            )
+            self.legacy_check.pack(anchor="w", pady=(0, 8))
             port_row = ttk.Frame(frame)
             port_row.pack(fill="x")
             ttk.Label(port_row, text="本机端口：").pack(side="left")
@@ -650,7 +685,13 @@ class _DesktopWindow:
             self.install_button.pack(side="left")
             ttk.Button(actions, text="退出", command=self._close).pack(side="right")
             self.root.protocol("WM_DELETE_WINDOW", self._close)
-            for observed_variable in (self.workspace, self.port, self.initialize, *self.permission_variables):
+            for observed_variable in (
+                self.workspace,
+                self.port,
+                self.initialize,
+                self.legacy_readonly,
+                *self.permission_variables,
+            ):
                 observed_variable.trace_add("write", self._parameters_changed)
             self._refresh_dependencies()
             self.root.after(75, self._poll)
@@ -693,7 +734,21 @@ class _DesktopWindow:
 
     def _diagnostic_parameters(self) -> DiagnosticParameters:
         workspace, port = self._parameters()
-        return DiagnosticParameters(str(workspace), port, self.initialize.get() is True, self._permissions())
+        return DiagnosticParameters(
+            str(workspace), port, self.initialize.get() is True, self._permissions(), self._legacy_mode()
+        )
+
+    def _legacy_mode(self) -> bool:
+        variable = getattr(self, "legacy_readonly", None)
+        return variable is not None and variable.get() is True
+
+    def _legacy_mode_changed(self) -> None:
+        if self._legacy_mode():
+            self.initialize.set(False)
+            for variable in self.permission_variables:
+                variable.set(False)
+            self.status.set("旧库只读：只在库外保存访问配置；不迁移、不同步、不调用模型。")
+        self._controls(self.controller.active)
 
     def _permissions(self) -> tuple[bool, bool, bool, bool]:
         variables = getattr(self, "permission_variables", None)
@@ -757,6 +812,10 @@ class _DesktopWindow:
         parameters = self._parameters()
         initialize_empty = self.initialize.get() is True
         permissions = self._permissions()
+        legacy_readonly = self._legacy_mode()
+        if legacy_readonly and (initialize_empty or any(permissions)):
+            self.status.set("旧库只读不能同时建立新库、配置模型或执行任务。")
+            return
         if permissions[2] and not permissions[0] or permissions[3] and not permissions[1]:
             self.status.set("执行任务前，请同时启用对应的模型配置或抖音登录能力。")
             return
@@ -767,7 +826,19 @@ class _DesktopWindow:
             self.status.set("端口不可用，请选择其他端口。")
             return
         state = report["workspace"]["state"]
-        if state in {"missing", "empty"}:
+        if legacy_readonly:
+            if state != "legacy_readonly":
+                self.status.set("未识别到可用的抖音旧库，或旧库身份已变化；没有初始化或迁移。")
+                return
+            if not self.messagebox.askyesno(
+                "只读连接旧库",
+                "确认只读打开所选旧资料库？原文件保持原位，不复制、不迁移、不调用模型。\n"
+                "访问口令配置单独保存在本机产品数据目录，不写进旧库。",
+                parent=self.root,
+            ):
+                self.status.set("已取消旧库连接；没有建立访问配置或启动服务。")
+                return
+        elif state in {"missing", "empty"}:
             if not self.initialize.get():
                 self.status.set("此位置没有资料库，请先明确同意建立新的空资料库。")
                 return
@@ -798,6 +869,7 @@ class _DesktopWindow:
             or parameters != self._parameters()
             or initialize_empty != (self.initialize.get() is True)
             or permissions != self._permissions()
+            or legacy_readonly != self._legacy_mode()
         ):
             return
         workspace, port = parameters
@@ -805,7 +877,9 @@ class _DesktopWindow:
         if cached is not None and cached.workspace is not None:
             workspace = cached.workspace
         self._start_intent = None
-        options = {"desktop_permissions": permissions} if any(permissions) else {}
+        options: dict[str, Any] = {"desktop_permissions": permissions} if any(permissions) else {}
+        if legacy_readonly:
+            options["legacy_readonly"] = True
         self.controller.start(workspace, port=port, initialize_empty=initialize_empty, **options)
         self._controls(True)
 
@@ -815,6 +889,9 @@ class _DesktopWindow:
 
     def _open_installation(self) -> None:
         """Main-thread fixed-catalog picker; never accepts an installation URL/path."""
+        if self._legacy_mode():
+            self.status.set("旧库只读无需安装提取组件；需要同步或处理时请选择新产品库。")
+            return
         if self.close_requested or self.controller.active or self._installation_active():
             return
         self._start_intent = None
@@ -901,6 +978,7 @@ class _DesktopWindow:
     ) -> None:
         if (
             self.close_requested
+            or self._legacy_mode()
             or self.controller.active
             or self._installation_active()
             or generation != self._install_generation
@@ -934,6 +1012,7 @@ class _DesktopWindow:
         # A confirmation dialog runs a nested Tk loop: selections/Stop/Close can change.
         if (
             self.close_requested
+            or self._legacy_mode()
             or self.controller.active
             or self._installation_active()
             or generation != self._install_generation
@@ -961,9 +1040,13 @@ class _DesktopWindow:
             self.choose_button,
             self.init_check,
             self.port_entry,
+            *([self.legacy_check] if hasattr(self, "legacy_check") else []),
             *getattr(self, "permission_checks", ()),
         ):
             widget.configure(state="disabled" if busy or self.close_requested else "normal")
+        if self._legacy_mode():
+            for widget in (self.init_check, *getattr(self, "permission_checks", ())):
+                widget.configure(state="disabled")
         self.start_button.configure(
             state="disabled" if busy or self.close_requested or self._start_intent is not None else "normal"
         )
@@ -974,7 +1057,9 @@ class _DesktopWindow:
         )
         install_button = getattr(self, "install_button", None)
         if install_button is not None:
-            install_button.configure(state="disabled" if busy or self.close_requested else "normal")
+            install_button.configure(
+                state="disabled" if busy or self.close_requested or self._legacy_mode() else "normal"
+            )
 
     def _stop(self) -> None:
         self._install_generation = getattr(self, "_install_generation", 0) + 1

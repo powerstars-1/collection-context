@@ -128,3 +128,28 @@ test("library search and list share version-bound continuation without hiding se
   assert.doesNotMatch(source, /!committedQuery&&listing\?\.next_offset/);
   assert.match(source, /if\(revision!==epoch\.current\)return/);
 });
+
+test("Access consumes the shared setup transport and cancels stale responses",()=>{
+  const source=read('src/Access.jsx');
+  assert.match(source,/getAgentSetup\(api,\{signal:controller\.signal\}\)/);
+  assert.match(source,/alive=false;controller\.abort\(\)/);
+  assert.match(source,/if\(alive\)setState/);
+  assert.match(source,/status:'loading',data:null/);
+  assert.match(source,/status:'failed',data:null/);
+  assert.match(source,/重新读取接入配置/);
+  assert.doesNotMatch(source,/createApi\(|setInterval|setTimeout/);
+  assert.doesNotMatch(source,/collection-context-mcp\s+|<你的资料库路径>|<旧资料目录路径>/);
+});
+
+test("Access clipboard is click-only and contains explicit manual setup and secret boundaries",()=>{
+  const source=read('src/Access.jsx');
+  assert.equal((source.match(/clipboard\.writeText\(/g)||[]).length,1);
+  assert.match(source,/<button[^>]+onClick=\{async\(\)=>\{[\s\S]*?clipboard\.writeText\(text\)/);
+  for(const label of ['本机 stdio','不需要另一个 HTTP 口令','不会自动安装依赖','尚未验证宿主调用',
+    '复制未完成，请手动选择','不要使用主人管理口令','模型 API Key','旧库只读模式保留原目录']) {
+    assert.ok(source.includes(label),`Missing setup boundary: ${label}`);
+  }
+  assert.doesNotMatch(source,/document\.cookie|csrf_token|localStorage|sessionStorage|\.exec\(|spawn\(/);
+  assert.match(source,/配置是否被宿主接受/);
+  assert.match(source,/whitespace-pre-wrap break-all/);
+});

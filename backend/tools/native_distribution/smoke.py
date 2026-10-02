@@ -15,6 +15,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -25,6 +26,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from collection_context.application.legacy_desktop import prepare_legacy_access
+from collection_context.interfaces.access import AccessRegistry
 from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
 
@@ -63,7 +66,14 @@ def files(root: Path) -> dict[str, str]:
 
 
 def exercise_http(
-    binary: Path, workspace: Path, token: str, cwd: Path, env: dict[str, str], *, mode: str = "web"
+    binary: Path,
+    workspace: Path,
+    token: str,
+    cwd: Path,
+    env: dict[str, str],
+    *,
+    mode: str = "web",
+    legacy: bool = False,
 ) -> dict:
     port = free_port()
     origin = f"http://127.0.0.1:{port}"
@@ -72,6 +82,9 @@ def exercise_http(
         if mode == "web"
         else ["launch", "--workspace", str(workspace), "--port", str(port), "--no-browser"]
     )
+    if legacy:
+        assert mode == "launch"
+        args.append("--legacy-vault")
     process = subprocess.Popen(
         [str(binary), *args],
         cwd=cwd,
@@ -108,7 +121,12 @@ def exercise_http(
         )
         with client.open(login, timeout=3) as response:
             result = json.load(response)
-        assert result["ok"] and "ui:manage" in result["data"]["permissions"]
+        assert result["ok"]
+        if legacy:
+            assert result["data"]["library_mode"] == "legacy_readonly"
+            assert set(result["data"]["permissions"]) == {"ui:view", "collections:read"}
+        else:
+            assert "ui:manage" in result["data"]["permissions"]
         with client.open(origin + "/v1/collections/overview", timeout=3) as response:
             overview = json.load(response)
         assert overview["ok"]
@@ -120,7 +138,25 @@ def exercise_http(
             assert response.status == 200 and len(response.read()) > 100_000
         with client.open(origin + "/assets/app.css", timeout=3) as response:
             assert response.status == 200 and len(response.read()) > 10_000
-        return {"health": True, "unauthenticated_denied": True, "cookie_login": True, "react_assets": True}
+        with client.open(origin + "/v1/agent-setup", timeout=3) as response:
+            setup = json.load(response)["data"]
+        assert setup["library_mode"] == ("legacy_readonly" if legacy else "managed")
+        assert setup["runtime_kind"] == "frozen_console" and setup["distribution_verified"] is False
+        configuration = setup["mcp"]["configuration"]["mcpServers"]["collection-context"]
+        assert configuration == {
+            "command": str(binary),
+            "args": ["mcp", "--workspace", str(workspace)] + (["--legacy-vault"] if legacy else []),
+        }
+        assert setup["http"]["base_url"] == origin and setup["model_requests"] == 0
+        assert token not in json.dumps(setup)
+        return {
+            "health": True,
+            "unauthenticated_denied": True,
+            "cookie_login": True,
+            "react_assets": True,
+            "generated_actual_configuration": True,
+            "mcp_configuration": configuration,
+        }
     finally:
         if process.poll() is None:
             process.send_signal(signal.SIGTERM)
@@ -134,10 +170,17 @@ def exercise_http(
             raise RuntimeError("Native terminal launcher did not stop cleanly")
 
 
-async def exercise_mcp(binary: Path, workspace: Path, env: dict[str, str]) -> dict:
+async def exercise_mcp(
+    binary: Path,
+    workspace: Path,
+    env: dict[str, str],
+    *,
+    configuration: dict | None = None,
+) -> dict:
+    entry = configuration or {"command": str(binary), "args": ["mcp", "--workspace", str(workspace)]}
     parameters = StdioServerParameters(
-        command=str(binary),
-        args=["mcp", "--workspace", str(workspace)],
+        command=entry["command"],
+        args=entry["args"],
         env=env,
     )
     async with asyncio.timeout(20):
@@ -234,10 +277,44 @@ def main() -> int:
         )
     )
     assert found["ok"] and len(found["data"]["items"]) == 1
-    mcp = asyncio.run(exercise_mcp(binary, workspace, env))
     http = exercise_http(binary, workspace, token, stage, env)
+    mcp = asyncio.run(exercise_mcp(binary, workspace, env, configuration=http["mcp_configuration"]))
     launch = exercise_http(binary, workspace, token, stage, env, mode="launch")
     assert files(workspace) == before
+    legacy = stage / "原创 旧资料库"
+    inbox = legacy / "00_素材收件箱" / "抖音"
+    attachment = legacy / "80_附件" / "抖音" / "61"
+    inbox.mkdir(parents=True)
+    attachment.mkdir(parents=True)
+    (inbox / "原创原生回归.md").write_text(
+        "# 原创原生回归\n\n## 基本信息\n- 平台: 抖音\n- 来源: 收藏\n"
+        "- 链接: https://www.douyin.com/video/61\n- 附件目录: 80_附件/抖音/61\n\n"
+        "## 原始材料\n这是原创固定样例，不是真实收藏。\n",
+        encoding="utf-8",
+    )
+    (attachment / "画面文字.md").write_text("原创原生画面：390×844；无模型请求。", encoding="utf-8")
+    if sys.platform == "darwin":
+        access_base = home / "Library" / "Application Support" / "CollectionContext" / "legacy-access"
+    elif sys.platform == "win32":
+        access_base = home / "AppData" / "Local" / "CollectionContext" / "legacy-access"
+    else:
+        access_base = home / ".local" / "share" / "collection-context" / "legacy-access"
+    access_store, _ = prepare_legacy_access(legacy, base=access_base)
+    try:
+        legacy_token = AccessRegistry(access_store).create("原创旧库测试", ui=True, manage=True)["token"]
+    finally:
+        access_store.close()
+    legacy_before = files(legacy)
+    legacy_http = exercise_http(binary, legacy, legacy_token, stage, env, mode="launch", legacy=True)
+    legacy_mcp = asyncio.run(
+        exercise_mcp(
+            binary,
+            legacy,
+            env,
+            configuration=legacy_http["mcp_configuration"],
+        )
+    )
+    assert files(legacy) == legacy_before and not (legacy / ".context").exists()
     report = {
         "passed": True,
         "binary": str(binary),
@@ -246,6 +323,9 @@ def main() -> int:
         "native_mcp": mcp,
         "native_http": http,
         "native_terminal_launcher": launch,
+        "native_legacy_terminal_launcher": legacy_http,
+        "native_legacy_generated_mcp": legacy_mcp,
+        "legacy_source_unchanged": True,
         "relocation": "Chinese and spaces, outside source and build environment",
         "child_path": env["PATH"],
         "no_user_python_or_node_on_path": True,

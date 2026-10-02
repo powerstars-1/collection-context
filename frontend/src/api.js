@@ -1,4 +1,9 @@
 // One same-origin transport for the original backend; no provider keys in browser storage.
+export async function getAgentSetup(request,options={}) {
+  if(typeof request!=='function')throw new Error('接入配置需要当前页面会话。');
+  return request('/v1/agent-setup',undefined,{signal:options.signal});
+}
+
 export function createApi(onExpired = () => {}) {
   let csrf = null;
   let generation = 0;

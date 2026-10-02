@@ -161,6 +161,11 @@ class HttpBoundary:
                     raise ContextError(
                         "permission_denied", "管理操作需要库主人管理口令的页面会话；AI读口令不具备此权限。"
                     )
+                if path == "/v1/agent-setup" and (session is None or "ui:view" not in credential.permissions):
+                    raise ContextError(
+                        "permission_denied",
+                        "本机接入配置仅向已登录的页面用户提供；AI读口令不能获取运行路径。",
+                    )
                 if not self.policy.rate_allowed("principal:" + credential.principal):
                     raise ContextError("rate_limited", "此凭据请求过于频繁。")
                 if self.legacy_readonly and not (
@@ -172,6 +177,7 @@ class HttpBoundary:
                         ("POST", "/v1/collections/read"),
                         ("POST", "/v1/collections/list"),
                         ("GET", "/v1/collections/overview"),
+                        ("GET", "/v1/agent-setup"),
                     }
                     or method == "GET"
                     and re.fullmatch(r"/v1/collections/[^/]+/status", path)
@@ -268,6 +274,7 @@ def create_app(
     model_secrets: CredentialBackend | None = None,
     connection_runner: ConnectionRunner | None = None,
     legacy_vault: Path | None = None,
+    legacy_binding_required: bool = False,
 ):
     try:
         from fastapi import FastAPI, Request
@@ -276,6 +283,8 @@ def create_app(
         from starlette.exceptions import HTTPException
     except ImportError:
         raise ContextError("dependency_required", "请安装此产品的 web 可选依赖。") from None
+    if type(legacy_binding_required) is not bool or legacy_binding_required and legacy_vault is None:
+        raise ContextError("invalid_argument", "旧库身份核对仅可用于明确的只读旧库服务。")
     legacy_reader = None
     if legacy_vault is not None:
         if model_secrets is not None or connection_runner is not None:
@@ -289,6 +298,10 @@ def create_app(
             from collection_context.library.legacy_layout import LegacyLayoutReader
 
             legacy_reader = LegacyLayoutReader(legacy_vault)
+            if legacy_binding_required:
+                from collection_context.application.legacy_desktop import verify_legacy_binding
+
+                verify_legacy_binding(store, legacy_reader)
         gateway = ReadGateway(legacy_reader if legacy_reader is not None else ContextService(store))
         if model_secrets is not None:
             from collection_context.application.model_setup import separate_credentials
@@ -397,6 +410,19 @@ def create_app(
     @app.get("/health")
     async def health():
         return result_response(envelope({"service": "collection-context", "development_candidate": True}))
+
+    async def agent_configuration(request):
+        if request.query_params or await request.body():
+            raise ContextError("invalid_argument", "接入说明使用当前服务配置，不接收目录、命令或其他参数。")
+        from collection_context.application.agent_setup import agent_setup
+
+        data = await run_in_threadpool(
+            agent_setup, store.files.root, policy.origin, legacy_vault=legacy_vault
+        )
+        return result_response(envelope(data))
+
+    agent_configuration.__annotations__["request"] = Request
+    app.add_api_route("/v1/agent-setup", agent_configuration, methods=["GET"])
 
     # Bind the locally imported type for FastAPI's annotation resolution without making
     # optional web dependencies mandatory for the standard-library core.
