@@ -15,18 +15,22 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.library.store import LibraryStore
 
+MAX_DIAGNOSTIC_BYTES = 65_536
+STARTUP_PHASES = frozenset({"server_module_import", "workspace_open", "application_create"})
+
 CHILD_TIMING = """
 import functools, json, sys, time
 started = time.perf_counter()
+print('context-startup-begin:server_module_import', file=sys.stderr, flush=True)
 import collection_context.interfaces.server as server
 print('context-startup:' + json.dumps({'phase': 'server_module_import',
     'seconds': time.perf_counter() - started, 'failed': False}), file=sys.stderr, flush=True)
@@ -35,6 +39,7 @@ def measured(label, function):
     def call(*args, **kwargs):
         begin = time.perf_counter()
         failed = False
+        print('context-startup-begin:' + label, file=sys.stderr, flush=True)
         try:
             return function(*args, **kwargs)
         except BaseException:
@@ -61,7 +66,7 @@ def phase_timings(body: str) -> list[dict]:
             if (
                 isinstance(value, dict)
                 and set(value) == {"phase", "seconds", "failed"}
-                and value["phase"] in {"server_module_import", "workspace_open", "application_create"}
+                and value["phase"] in STARTUP_PHASES
                 and type(value["seconds"]) in {int, float}
                 and 0 <= value["seconds"] <= 600
                 and type(value["failed"]) is bool
@@ -70,6 +75,49 @@ def phase_timings(body: str) -> list[dict]:
         except (ValueError, TypeError):
             continue
     return rows[:3]
+
+
+def unfinished_phase(body: str) -> str:
+    active = "not_observed"
+    for line in body.splitlines():
+        if line.startswith("context-startup-begin:"):
+            label = line.removeprefix("context-startup-begin:")
+            if label in STARTUP_PHASES:
+                active = label
+        elif line.startswith("context-startup:"):
+            rows = phase_timings(line)
+            if rows and rows[0]["phase"] == active:
+                active = "no_active_instrumented_phase"
+    return active
+
+
+class DiagnosticCapture:
+    """Observe the original owned pipe; bounded RAM only, no stderr files.
+
+    The existing StartupLogs remains the drain/close owner. This wrapper never
+    independently reads or closes that pipe and cannot turn early child output
+    into readiness. Stop and join the owner before parsing a snapshot.
+    """
+
+    def __init__(self):
+        self.body = bytearray()
+        self.clipped = False
+
+    def observe(self, stream):
+        capture = self
+
+        class Pipe:
+            def read1(self, size=-1):
+                chunk = stream.read1(size)
+                remaining = MAX_DIAGNOSTIC_BYTES - len(capture.body)
+                capture.clipped |= len(chunk) > remaining
+                capture.body.extend(chunk[:remaining])
+                return chunk  # Overflow still reaches the original drain owner.
+
+            def close(self):
+                stream.close()
+
+        return Pipe()
 
 
 class OperationTimings:
@@ -144,36 +192,53 @@ def https_probe(stage: Path) -> dict:
     from tools import remote_https_smoke
 
     original = subprocess.Popen
+    original_logs = remote_https_smoke.StartupLogs
     timings = OperationTimings()
-    with tempfile.TemporaryFile(dir=stage) as stderr:
+    capture = DiagnosticCapture()
 
-        def traced_process(args, *extra, **kwargs):
-            if "collection_context.interfaces.server" in args:
-                args = [args[0], "-c", CHILD_TIMING, *args[3:]]
-                kwargs["env"] = {**kwargs["env"], "PYTHONPROFILEIMPORTTIME": "1"}
-                kwargs["stderr"] = stderr
-            return original(args, *extra, **kwargs)
+    def traced_process(args, *extra, **kwargs):
+        if "collection_context.interfaces.server" in args:
+            args = [args[0], "-c", CHILD_TIMING, *args[3:]]
+            kwargs["env"] = {**kwargs["env"], "PYTHONPROFILEIMPORTTIME": "1"}
+            # Preserve PIPE and Popen.stderr. Redirecting to a temporary file
+            # invalidated the smoke's owned-pipe contract before readiness ran.
+        return original(args, *extra, **kwargs)
 
-        started = time.perf_counter()
-        subprocess.Popen = traced_process
-        try:
-            with timings.measure():
-                result = remote_https_smoke.run_smoke()
-            state = result["result"]
-        except Exception:
-            state = "failed"
-        finally:
-            subprocess.Popen = original
-        elapsed = time.perf_counter() - started
-        stderr.seek(0)
-        body = stderr.read(2_000_001)
+    class ObservedLogs(remote_https_smoke.StartupLogs):
+        def __init__(self, stream):
+            super().__init__(capture.observe(stream))
+
+    started = time.perf_counter()
+    setattr(subprocess, "Popen", traced_process)
+    setattr(remote_https_smoke, "StartupLogs", ObservedLogs)
+    startup = None
+    try:
+        with timings.measure():
+            result = remote_https_smoke.run_smoke()
+        state = result["result"]
+        startup = result["startup"]
+    except remote_https_smoke.StartupFailure as error:
+        state = "failed"
+        startup = error.observation
+    except Exception:
+        state = "failed"
+    finally:
+        setattr(subprocess, "Popen", original)
+        setattr(remote_https_smoke, "StartupLogs", original_logs)
+    elapsed = time.perf_counter() - started
+    body = capture.body.decode("utf-8", errors="replace")
     return {
         "state": state,
         "elapsed_seconds": round(elapsed, 6),
         "original_ready_limit_seconds": 8,
-        "import_diagnostics_truncated": len(body) > 2_000_000,
-        "child_imports": import_timings(body[:2_000_000].decode("utf-8", errors="replace")),
-        "child_startup_phases": phase_timings(body[:2_000_000].decode("utf-8", errors="replace")),
+        # Import profiling itself prints public module names such as traceback;
+        # the original substring classifier may label them error_logged.
+        "import_profiling_can_change_stderr_classification": True,
+        "import_diagnostics_truncated": capture.clipped,
+        "startup_observation": startup,
+        "unfinished_instrumented_phase": unfinished_phase(body),
+        "child_imports": import_timings(body),
+        "child_startup_phases": phase_timings(body),
         **timings.report(),
     }
 
@@ -226,7 +291,7 @@ def main() -> int:
     ):
         raise ValueError("Expected a new explicit ordinary output directory")
     stage.mkdir(mode=0o700)
-    report = {
+    report: dict[str, Any] = {
         "scope": "original_offline_startup_and_worker_only",
         "instrumentation_changes_timing": True,
         "root_cause_proven": False,
