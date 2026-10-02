@@ -349,7 +349,10 @@ def publish_stage(
         published = store.save_bundle(
             ref, artifacts, expected_content_hash=content_hash, expected_prepared_input=prepared_input
         )
-        indexed = FileIndex(store).rebuild()
+        # save_bundle's content transaction already maintains the derived index.
+        # Read/verify its published pointer instead of acquiring another writer
+        # and durably rebuilding the same index a second time.
+        indexed = FileIndex(store).load(store.snapshot())
         return StageOutcome(
             {
                 "artifact_versions": {kind: value["version"] for kind, value in published.items()},

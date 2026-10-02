@@ -12,6 +12,7 @@ from test_context_media import PNG
 from collection_context.application.contracts import ContextError
 from collection_context.application.service import ContextService
 from collection_context.infrastructure.media import AudioSegment, FrameCandidate, PreparedFrame
+from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
 from collection_context.processing.models import CloudModelClient, ModelProfile
 from collection_context.processing.stages import audio_stage, publish_stage, summary_stage, vision_stage
@@ -31,6 +32,47 @@ def item(store):
         kind="saved",
         scope_id="s_saved",
     )["item"]
+
+
+def test_publish_uses_one_automatic_index_maintenance_and_readonly_validation(store, monkeypatch):
+    material = item(store)
+    rebuilt = []
+    maintain = FileIndex.rebuild_committed
+
+    def count(index, state, owner, **kwargs):
+        rebuilt.append(state["generation"])
+        return maintain(index, state, owner, **kwargs)
+
+    monkeypatch.setattr(FileIndex, "rebuild_committed", count)
+    monkeypatch.setattr(
+        FileIndex, "rebuild", lambda *a, **kw: pytest.fail("publication rebuilt the index twice")
+    )
+    stage = publish_stage(store, material["id"], material["content_hash"], ("summary",))
+    result = stage.invoke(
+        {"summary": {"status": "ready", "output": {"kind": "summary", "text": "原创总结，保留参数390。"}}}
+    )
+    assert result.status == "ready" and len(rebuilt) == 1
+    indexed = FileIndex(store).load(store.snapshot())
+    assert result.output["library_version"] == indexed["library_version"]
+    assert ContextService(store).search("保留参数390")["total_matches"] == 1
+    assert len(rebuilt) == 1
+
+
+def test_publish_retains_index_integrity_failure_after_content_commit(store, monkeypatch):
+    material = item(store)
+    maintained = FileIndex.rebuild_committed
+
+    def damage(index, state, owner, **kwargs):
+        result = maintained(index, state, owner, **kwargs)
+        index.store.files.write(".context/索引/CURRENT.json", b"{}", replace=True)
+        return result
+
+    monkeypatch.setattr(FileIndex, "rebuild_committed", damage)
+    stage = publish_stage(store, material["id"], material["content_hash"], ("summary",))
+    with pytest.raises(ContextError) as caught:
+        stage.invoke({"summary": {"status": "ready", "output": {"kind": "summary", "text": "原创结果。"}}})
+    assert caught.value.code == "index_unavailable"
+    assert store.get(material["id"])["artifacts"]["summary"]["state"] == "ready"
 
 
 def audio():
