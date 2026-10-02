@@ -457,10 +457,19 @@ def create_app(
             "export": {"material_ref", "media_scope", "preview_token", "confirmed"},
             "edit-preview": {"material_ref", "artifact"},
             "edit-confirm": {"material_ref", "artifact", "preview_token", "confirmed"},
+            "summary-preview": {"material_ref"},
+            "summary-confirm": {"material_ref", "preview_token", "idempotency_key", "fee_confirmed"},
         }
         if action not in allowed or set(value) - allowed[action]:
             raise ContextError("invalid_argument", "资料管理只接收指定字段，不接收文件路径。")
-        for key in {"material_ref", "media_scope", "preview_token", "version", "artifact"} & set(value):
+        for key in {
+            "material_ref",
+            "media_scope",
+            "preview_token",
+            "version",
+            "artifact",
+            "idempotency_key",
+        } & set(value):
             if not isinstance(value[key], str) or len(value[key]) > 200:
                 raise ContextError("invalid_argument", "引用、范围和版本须为限定长度的文本。")
         if action in {
@@ -470,6 +479,8 @@ def create_app(
             "export",
             "edit-preview",
             "edit-confirm",
+            "summary-preview",
+            "summary-confirm",
         }:
             required = allowed[action] - ({"media_scope"} if action == "export-preview" else set())
             if not required <= set(value):
@@ -502,6 +513,16 @@ def create_app(
                 artifact=value["artifact"],
                 preview_token=value["preview_token"],
                 confirmed=value["confirmed"],
+            )
+        elif action == "summary-preview":
+            result = await run_in_threadpool(controller.preview_summary, ref)
+        elif action == "summary-confirm":
+            result = await run_in_threadpool(
+                controller.submit_summary,
+                ref,
+                preview_token=value["preview_token"],
+                idempotency_key=value["idempotency_key"],
+                fee_confirmed=value["fee_confirmed"],
             )
         else:
             archive = await run_in_threadpool(

@@ -39,6 +39,10 @@ class ExtractionWorkflow:
         )
 
     def _build(self, context: dict[str, Any], *, planning: bool = False) -> list[Stage]:
+        if isinstance(context, dict) and context.get("workflow") == "summary_refresh":
+            from collection_context.processing.summary_refresh import build
+
+            return build(self.store, self.resolve_secret, context, planning=planning)
         if not isinstance(context, dict) or set(context) != {
             "schema_version",
             "workflow",

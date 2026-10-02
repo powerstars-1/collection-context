@@ -309,6 +309,8 @@ class LibraryManagement:
             updated.pop("prepared_input", None)
             if "prepared_input" in previous:
                 updated["prepared_input"] = previous["prepared_input"]
+            if "source_artifacts" in previous:
+                updated["source_artifacts"] = previous["source_artifacts"]
             updated["owner_edit"] = {
                 "previous_version": previous["version"],
                 "previous_sha256": previous["sha256"],
@@ -347,6 +349,73 @@ class LibraryManagement:
             return {"material_ref": ref, "excluded": excluded, "files_deleted": False, "model_requests": 0}
 
         return self.store.transact(change)
+
+    def _summary_preview(self, ref: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        from collection_context.processing.profiles import ModelCatalog
+        from collection_context.processing.summary_refresh import capture, prepare
+
+        payload = prepare(self.store, ref)
+        snapshot = capture(self.store, ref)
+        profile = ModelCatalog(self.store).get(payload["extraction"]["model_profiles"]["summary"])
+        return {
+            "material_ref": ref,
+            "model": profile["model"],
+            "preview_token": digest([self.store.workspace_id, payload]),
+            "source_artifacts": [source["kind"] for source in snapshot["sources"]],
+            "missing_or_stale": snapshot["coverage"]["missing_or_stale"],
+            "max_model_requests": 1,
+            "model_requests": 0,
+            "estimated_cost": "unknown",
+            "raw_media_reprocessed": False,
+            "pending_jobs": self._pending_jobs(self.store.snapshot()),
+        }, payload
+
+    def preview_summary(self, ref: str) -> dict[str, Any]:
+        self.authorize()
+        preview, _ = self._summary_preview(ref)
+        self.authorize()
+        return preview
+
+    def submit_summary(
+        self, ref: str, *, preview_token: str, idempotency_key: str, fee_confirmed: bool
+    ) -> dict[str, Any]:
+        from collection_context.processing.summary_refresh import verify
+        from collection_context.workflows.jobs import JobManager
+
+        self.authorize()
+        if fee_confirmed is not True:
+            raise ContextError(
+                "processing_authorization_required", "只更新总结也会调用模型，请确认一次请求的费用。"
+            )
+        preview, payload = self._summary_preview(ref)
+        if preview_token != preview["preview_token"]:
+            raise ContextError("version_changed", "正文或总结模型配置已变化，请重新预览。")
+
+        def authorize_commit():
+            self.authorize()
+            verify(self.store, payload["extraction"])
+
+        def admit(state, _job):
+            authorize_commit()
+            if self._pending_jobs(state):
+                raise ContextError("library_busy", "请先完成或取消待处理任务，再更新总结。")
+
+        mutation = JobManager(self.store)._submission(
+            "process",
+            payload,
+            idempotency_key=idempotency_key,
+            max_calls=1,
+            admission=admit,
+        )
+        job = self.store.transact(mutation, before_commit=authorize_commit)
+        return {
+            "job_id": job["id"],
+            "state": job["state"],
+            "max_model_requests": 1,
+            "model_requests": 0,
+            "raw_media_reprocessed": False,
+            "execution": "separately_authorized_worker",
+        }
 
     def _export_files(self, state: dict[str, Any], ref: str, media_scope: str) -> dict[str, bytes]:
         if media_scope not in {"all", "none"}:

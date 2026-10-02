@@ -23,7 +23,7 @@ from collection_context.application.contracts import (
 )
 from collection_context.infrastructure.files import SafeFiles
 from collection_context.infrastructure.ownership import ExecutorLease
-from collection_context.library.index import FileIndex
+from collection_context.library.index import FileIndex, source_refs
 from collection_context.library.legacy_references import validate_legacy_references
 from collection_context.library.store import LEGACY_GUARD, WRITER_PROTOCOL, LibraryStore
 from collection_context.processing.inputs import PreparedInputs
@@ -166,6 +166,7 @@ def _collect_files(
                 retained_tracking[entry_path] = tracked
         _add_file(files, entry_path, entry_body)
         for kind, artifact in item["artifacts"].items():
+            source_refs(artifact)
             # Backup retains stale artifacts, including former audio from a now-silent video.
             # Use fixed identity paths rather than semantic read eligibility.
             body = store.files.read(_artifact_path(ref, kind, artifact), max_bytes=2_000_000)
@@ -407,6 +408,7 @@ def _validate_references(
             expected.add(entry_path)
             readable_paths.add(entry_path)
             for kind, artifact in item["artifacts"].items():
+                source_refs(artifact)
                 path = _artifact_path(ref, kind, artifact)
                 body = files.get(path)
                 if body is None or _sha256(body) != artifact["sha256"]:

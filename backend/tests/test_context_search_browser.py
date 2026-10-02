@@ -149,6 +149,14 @@ def test_actual_owner_edit_preview_confirmation_and_stale_summary(tmp_path):
         },
         expected_content_hash=item["content_hash"],
     )
+    from collection_context.processing.profiles import ModelCatalog
+
+    ModelCatalog(store).configure(
+        role="summary",
+        base_url="https://fixture.invalid/v1",
+        model="summary-fixture",
+        credential_ref="k_" + "7" * 32,
+    )
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
@@ -225,6 +233,30 @@ def test_actual_owner_edit_preview_confirmation_and_stale_summary(tmp_path):
                     page.get_by_role("tab", name="画面文字", exact=True).click()
                     expect(page.locator("#evidence-text")).to_have_text(text)
                     assert page.evaluate("window.untrustedEdit === undefined")
+                page.get_by_role("button", name="仅更新总结", exact=True).click()
+                tools = page.get_by_role("region", name="资料管理", exact=True)
+                expect(tools).to_contain_text("最多 1 次总结请求，金额未知")
+                confirm = tools.get_by_role("button", name="确认更新总结", exact=True)
+                expect(confirm).to_be_disabled()
+                assert not store.snapshot()["jobs"]
+                tools.get_by_role(
+                    "checkbox",
+                    name="我已确认上传已保存正文，并授权最多一次总结模型请求（费用未知）",
+                    exact=True,
+                ).check()
+                expect(confirm).to_be_enabled()
+                assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
+                page.screenshot(path=str(tmp_path / "owner-summary-preview-412.png"), full_page=True)
+                with page.expect_response(
+                    lambda response: response.url.endswith("/v1/management/library/summary-confirm")
+                ) as response:
+                    confirm.click()
+                payload = response.value.request.post_data_json
+                assert payload["fee_confirmed"] is True and "confirmed" not in payload
+                assert response.value.json()["data"]["model_requests"] == 0
+                jobs = list(store.snapshot()["jobs"].values())
+                assert len(jobs) == 1 and jobs[0]["state"] == "queued"
+                assert jobs[0]["budget"]["max_calls"] == 1 and jobs[0]["calls"] == []
                 assert not errors
             finally:
                 browser.close()

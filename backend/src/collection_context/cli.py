@@ -78,6 +78,11 @@ def parser() -> argparse.ArgumentParser:
     edits.add_argument("--artifact", required=True, choices=ARTIFACT_KINDS)
     edits.add_argument("--preview-token", help="先预览；确认时携带预览标识")
     edits.add_argument("--confirm-edit", action="store_true", help="明确接纳正文并使依赖结果过期")
+    summary = commands.add_parser("refresh-summary", help="预览并确认仅从已保存正文更新总结；不重跑音视频")
+    summary.add_argument("--ref", required=True)
+    summary.add_argument("--preview-token")
+    summary.add_argument("--idempotency-key")
+    summary.add_argument("--confirm-fee", action="store_true", help="明确授权最多一次总结模型请求；只排队")
     access = commands.add_parser("access-key", help="本地建立产品访问口令；仅在本终端显示一次，不是模型 Key")
     access.add_argument("--name", required=True)
     access.add_argument("--ui", action="store_true", help="同时允许登录页面；不授予处理或计费权限")
@@ -334,6 +339,23 @@ def main(argv: list[str] | None = None) -> int:
                     raise ContextError("confirmation_required", "携带预览标识仍须明确确认接纳修改。")
                 else:
                     data = edits.preview_edit(args.ref, artifact=args.artifact)
+            elif args.command == "refresh-summary":
+                from collection_context.application.library_management import LibraryManagement
+
+                library = LibraryManagement(store, authorize=lambda: None)
+                if args.confirm_fee:
+                    data = library.submit_summary(
+                        args.ref,
+                        preview_token=args.preview_token,
+                        idempotency_key=args.idempotency_key,
+                        fee_confirmed=True,
+                    )
+                elif args.preview_token is not None or args.idempotency_key is not None:
+                    raise ContextError(
+                        "processing_authorization_required", "携带预览或任务标识仍需明确费用授权。"
+                    )
+                else:
+                    data = library.preview_summary(args.ref)
             elif args.command == "submit-link":
                 from collection_context.workflows.addition import AdditionWorkflow
 

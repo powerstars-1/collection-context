@@ -32,6 +32,27 @@ def audio_not_applicable(item: dict[str, Any]) -> bool:
     )
 
 
+def source_refs(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = artifact.get("source_artifacts", [])
+    if not isinstance(sources, list) or len(sources) > 4:
+        raise ContextError("artifact_dependency_changed", "总结证据引用结构无效。")
+    seen = set()
+    for source in sources:
+        if (
+            not isinstance(source, dict)
+            or set(source) != {"kind", "version", "sha256"}
+            or not isinstance(source["kind"], str)
+            or source["kind"] not in {"original", "audio", "screen", "image"}
+            or source["kind"] in seen
+            or not isinstance(source["sha256"], str)
+            or not re.fullmatch(r"[a-f0-9]{64}", source["sha256"])
+        ):
+            raise ContextError("artifact_dependency_changed", "总结证据引用无效。")
+        valid_id(source["version"])
+        seen.add(source["kind"])
+    return sources
+
+
 def artifact_bytes(store: LibraryStore, item: dict[str, Any], kind: str) -> bytes:
     if kind == "audio" and audio_not_applicable(item):
         raise ContextError("artifact_not_applicable", "此资料没有音轨，转写不适用；未用图中文字代替音频。")
@@ -59,6 +80,15 @@ def artifact_bytes(store: LibraryStore, item: dict[str, Any], kind: str) -> byte
         body.decode("utf-8")
     except UnicodeDecodeError:
         raise ContextError("invalid_artifact", "产物不是有效 UTF-8 文本。") from None
+    sources = source_refs(artifact)
+    if kind in {"summary", "readable"} and is_current(item, artifact):
+        for source in sources:
+            try:
+                artifact_bytes(store, item, source["kind"])
+            except ContextError as error:
+                raise ContextError(
+                    "artifact_dependency_changed", "总结依赖的正文需重新核对，未返回缓存旧文。"
+                ) from error
     return body
 
 
@@ -67,12 +97,22 @@ def original_text(item: dict[str, Any]) -> str:
 
 
 def is_current(item: dict[str, Any], artifact: dict[str, Any]) -> bool:
+    try:
+        sources = source_refs(artifact)
+    except ContextError:
+        return False
     return (
         artifact["state"] == "ready"
         and (artifact["kind"] == "user_note" or artifact["input_hash"] == item["content_hash"])
         and (
             artifact["kind"] in {"original", "user_note"}
             or artifact.get("prepared_input") == item.get("prepared_input")
+        )
+        and all(
+            item["artifacts"].get(source["kind"], {}).get("version") == source.get("version")
+            and item["artifacts"].get(source["kind"], {}).get("sha256") == source.get("sha256")
+            and item["artifacts"].get(source["kind"], {}).get("state") == "ready"
+            for source in sources
         )
     )
 
