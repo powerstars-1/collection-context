@@ -30,7 +30,6 @@ FILENAMES = {
     "audio": "音频转写.md",
     "screen": "画面文字.md",
     "summary": "内容总结.md",
-    "readable": "可读内容.md",
     "image": "图片提取.md",
 }
 SOURCE_ALIASES = {

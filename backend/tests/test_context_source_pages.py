@@ -185,6 +185,13 @@ class AccountPage:
     def route(self, *a):
         pass
 
+    def remove_listener(self, event, callback):
+        assert self.callback == callback
+        self.callback = None
+
+    def unroute(self, *a):
+        pass
+
     def goto(self, *a, **k):
         for path, value in self.responses:
             self.callback(
@@ -214,6 +221,30 @@ def test_account_browser_uses_only_self_response_not_other_profile():
         ]
     )
     browser = SimpleNamespace(headless=True, context=SimpleNamespace(new_page=lambda: page))
+    assert DouyinBrowserSource(browser).account().uid == "123" and page.closed
+
+
+def test_account_waits_for_fresh_response_after_cancelled_old_navigation_body():
+    class Page(AccountPage):
+        def goto(self, *_, **kwargs):
+            assert kwargs["wait_until"] == "commit"
+
+            def cancelled_body():
+                raise RuntimeError("synthetic response cancelled during navigation")
+
+            self.callback(SimpleNamespace(
+                url="https://www.douyin.com/aweme/v1/web/user/profile/self/",
+                status=200, headers={}, body=cancelled_body,
+            ))
+
+        def wait_for_timeout(self, _):
+            self.callback(SimpleNamespace(
+                url="https://www.douyin.com/aweme/v1/web/user/profile/self/",
+                status=200, headers={}, body=lambda: json.dumps(account_payload()).encode(),
+            ))
+
+    page = Page([])
+    browser = SimpleNamespace(headless=False, context=SimpleNamespace(new_page=lambda: page))
     assert DouyinBrowserSource(browser).account().uid == "123" and page.closed
 
 

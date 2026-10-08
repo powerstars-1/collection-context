@@ -54,6 +54,8 @@ def source_refs(artifact: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def artifact_bytes(store: LibraryStore, item: dict[str, Any], kind: str) -> bytes:
+    if kind == "readable":
+        raise ContextError("invalid_artifact", "合并阅读稿已停用，请读取独立的总结、音频或画面结果。")
     if kind == "audio" and audio_not_applicable(item):
         raise ContextError("artifact_not_applicable", "此资料没有音轨，转写不适用；未用图中文字代替音频。")
     artifact = item["artifacts"].get(kind)
@@ -65,7 +67,6 @@ def artifact_bytes(store: LibraryStore, item: dict[str, Any], kind: str) -> byte
         "audio": "音频转写",
         "screen": "画面文字",
         "summary": "内容总结",
-        "readable": "可读内容",
         "image": "图片提取",
         "user_note": "用户备注",
     }[kind]
@@ -81,7 +82,7 @@ def artifact_bytes(store: LibraryStore, item: dict[str, Any], kind: str) -> byte
     except UnicodeDecodeError:
         raise ContextError("invalid_artifact", "产物不是有效 UTF-8 文本。") from None
     sources = source_refs(artifact)
-    if kind in {"summary", "readable"} and is_current(item, artifact):
+    if kind == "summary" and is_current(item, artifact):
         for source in sources:
             try:
                 artifact_bytes(store, item, source["kind"])
@@ -168,6 +169,8 @@ class FileIndex:
             lines.append(f"- {relation['kind']} / `{relation['scope_id']}` / {action}")
         lines.extend(["", "## 原文元数据", "", item["body"] or "（无正文元数据）", "", "## 已提交产物", ""])
         for kind, artifact in sorted(item["artifacts"].items()):
+            if kind == "readable":
+                continue
             path = PurePosixPath(artifact["path"])
             if len(path.parts) >= 2:
                 relative = PurePosixPath("../../80_附件/抖音") / item["id"] / path.parts[-2] / path.name
@@ -292,6 +295,8 @@ class FileIndex:
                 continue
             fields = {"metadata": "\n".join((item["title"], item["author"], item["body"]))}
             for kind, artifact in item["artifacts"].items():
+                if kind == "readable":
+                    continue
                 if kind == "audio" and audio_not_applicable(item):
                     continue
                 if not is_current(item, artifact):
@@ -343,4 +348,8 @@ class FileIndex:
             raise ContextError("index_unavailable", "索引校验失败；可从原资料显式重建。") from None
         if data["library_version"] != library_version(state):
             raise ContextError("index_outdated", "资料清单已变化；请重建索引后再搜索。", retryable=True)
+        # Old immutable indexes may contain the retired concatenated output.
+        for fields in data["documents"].values():
+            fields.pop("readable", None)
+        data["gaps"] = [gap for gap in data["gaps"] if gap.get("artifact") != "readable"]
         return data

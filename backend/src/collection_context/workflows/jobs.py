@@ -544,6 +544,7 @@ class JobManager:
                 target = {"call_id": result_id, "path": path, "sha256": hashlib.sha256(body).hexdigest()}
             stage_result = {
                 "state": result["status"],
+                "reused": descriptor is not None,
                 "input_hash": input_hash,
                 "signature": signature,
                 "result": target,

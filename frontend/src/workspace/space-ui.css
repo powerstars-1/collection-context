@@ -1,0 +1,100 @@
+/* Shared component language: quiet instrument edges, graphite glass, silver actions. */
+:root{
+  --ui-edge:#70829c;--ui-edge-soft:#65779152;--ui-glass:linear-gradient(145deg,#192230cf,#080d17e8);
+  --ui-control:linear-gradient(180deg,#253246b5,#121c2bd9);
+  --ui-control-hover:linear-gradient(180deg,#34475ec9,#1a293fe6);
+  --ui-silver-top:#e4edf9;--ui-silver-bottom:#b5c7e0;--ui-control-ink:#e3ecfa;--ui-quiet:#a8b6c9;
+}
+.shell>.top{background:linear-gradient(180deg,#070b13e8,#090f1980);border-bottom:1px solid #a7c1e922;box-shadow:0 1px 0 #0008}
+.brand{font-size:16px;font-weight:500;letter-spacing:1.5px;color:#eff4fc}
+.brand small{font-size:7px;letter-spacing:2.2px;font-weight:400;color:#9cabc3;margin-top:5px}
+.brand-mark{background:none;border:0;color:#c8dcf9;width:36px;height:36px;border-radius:0}
+.brand-mark .orbit-mark{width:36px;height:36px;filter:drop-shadow(0 0 5px #b3cfff35)}
+.top nav{border-radius:12px;border-color:#8496b247;background:linear-gradient(180deg,#182131d4,#0b111dcc);padding:4px;gap:3px;box-shadow:inset 0 1px 0 #f0f6ff0a,0 5px 20px #0003}
+.top nav button{position:relative;display:flex;align-items:center;justify-content:center;gap:8px;padding:9px 15px;border-radius:8px;color:#aebbd0;line-height:1.2;font-size:12px;letter-spacing:.3px}
+.top nav .nav-copy{text-align:left}
+.top nav button .nav-glyph{width:14px;height:14px;opacity:.75}
+.top nav button small{font-size:7px;letter-spacing:1px;margin-top:5px;color:#96a6bf}
+.top nav button.active,.top nav button[aria-current]{background:linear-gradient(180deg,#adcaed22,#58729713);box-shadow:inset 0 1px 0 #d5e7ff28,inset 0 0 0 1px #88a4c853;color:#eef5ff}
+.top nav button.active:after,.top nav button[aria-current]:after{content:'';position:absolute;bottom:1px;left:22%;right:22%;height:1px;background:linear-gradient(90deg,transparent,#d4e5ff,transparent)}
+.top nav button:hover{background:#bfd9ff0c;color:#eaf3ff}
+.top-end .icon{border:1px solid #7d90ae45;border-radius:9px;background:#13203470;color:#c4d3e9;width:34px;height:34px;box-shadow:inset 0 1px 0 #e7f1ff08}
+.top-end .icon:hover{background:#243650a8;border-color:#a1b6d375}
+.prototype-bar{font-size:10px;letter-spacing:.3px;color:#9fafc3}.prototype-bar i{box-shadow:0 0 8px #c3d5ee55}
+.shell .primary,.live-controls .cc-button.cc-button--primary,.live-controls .cc-sources-page button.bg-blue-700{
+  background:linear-gradient(180deg,var(--ui-silver-top),var(--ui-silver-bottom))!important;border:1px solid #c0d3ec!important;color:#101d30!important;
+  border-radius:8px;box-shadow:inset 0 1px 0 #ffffffc0,0 3px 12px #0003;font-weight:550;letter-spacing:.2px;
+}
+.shell .primary:hover:not(:disabled),.live-controls .cc-button.cc-button--primary:hover:not(:disabled),.live-controls .cc-sources-page button.bg-blue-700:hover:not(:disabled){background:linear-gradient(180deg,#f1f6ff,#c8daf0)!important;border-color:#e4efff!important;color:#101d30!important;box-shadow:inset 0 1px 0 #fff,0 0 18px #aecbff18}
+.shell .secondary,.live-controls .cc-button--secondary,.live-controls .cc-text-button,.live-controls .cc-history-button,.live-controls .cc-sources-page :is(button.inline-flex,.cc-text-button,.cc-history-button,.cc-source-more>summary){
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:8px 13px;line-height:18px;
+  background:var(--ui-control)!important;border:1px solid var(--ui-edge)!important;color:var(--ui-control-ink)!important;
+  border-radius:8px;box-shadow:inset 0 1px 0 #eaf3ff12,0 3px 10px #0002;font-size:12px;font-weight:500;letter-spacing:.15px;
+}
+.shell .secondary:hover:not(:disabled),.live-controls .cc-button--secondary:hover:not(:disabled),.live-controls .cc-text-button:hover:not(:disabled),.live-controls .cc-sources-page :is(button.inline-flex,.cc-text-button,.cc-history-button,.cc-source-more>summary):hover:not(:disabled){background:var(--ui-control-hover)!important;border-color:#a2b8d7!important;color:#f0f6ff!important;box-shadow:inset 0 1px 0 #eaf3ff22,0 0 15px #91b5ec0a}
+/* Reassert primary variant after the source page's generic action rule. */
+.live-controls .cc-sources-page button.cc-button--primary{background:linear-gradient(180deg,var(--ui-silver-top),var(--ui-silver-bottom))!important;color:#101d30!important;border-color:#c0d3ec!important}
+.live-controls .cc-sources-page button.cc-button--primary:hover:not(:disabled){background:linear-gradient(180deg,#f1f6ff,#c8daf0)!important;color:#101d30!important;border-color:#e4efff!important}
+.shell :is(.primary,.secondary):disabled,.live-controls .cc-button:disabled,.live-controls .cc-sources-page :is(button.inline-flex,.cc-text-button,.cc-history-button):disabled{background:#131c2b!important;border-color:#53647e!important;color:#9eacc1!important;box-shadow:none;opacity:1!important}
+.shell .primary:disabled,.live-controls .cc-button--primary:disabled,.live-controls .cc-sources-page button.cc-button--primary:disabled{background:#879bb7!important;color:#17283e!important;border-color:#879bb7!important}
+.live-controls .cc-button--danger{color:#efc1bf!important;border-color:#a0747f!important}
+.shell :is(.primary,.secondary):active,.live-controls .cc-button:active{transform:none!important;scale:1!important;box-shadow:inset 0 2px 4px #0003}
+.shell :is(button,a,input,textarea,select):focus-visible,.live-controls .cc-button:focus-visible{outline:2px solid #c5ddff;outline-offset:3px}
+.live-controls .cc-input,.live-controls button.cc-input,.live-controls select,.live-controls input:not([type=checkbox]),.live-controls textarea{
+  background:linear-gradient(180deg,#070d17,#111b2a)!important;border:1px solid #7587a1!important;border-radius:8px;color:#e2edff!important;box-shadow:inset 0 2px 6px #0004;font-size:13px;
+}
+.live-controls .cc-input:focus,.live-controls button.cc-input[aria-expanded=true]{border-color:#b4cced!important;box-shadow:inset 0 2px 6px #0004,0 0 0 2px #aacaff16}
+.live-controls .cc-input{min-height:40px;padding:9px 12px!important;line-height:20px}
+.live-controls .cc-field>span{font-size:12px;color:#b5c4d8!important;font-weight:450;letter-spacing:.25px}
+.live-controls .cc-ui-page>.cc-page-heading{padding-bottom:17px;border-bottom:1px solid #8ba5c323;gap:16px}
+.live-controls .cc-page-heading h1{font-size:27px;font-weight:450;letter-spacing:1.4px;line-height:1.4;color:#f0f5fd!important}
+.live-controls .cc-page-description{font-size:12px;line-height:1.8;margin-top:7px;color:#a6b5cb}
+.live-controls h2,.live-controls .cc-section-heading h2{font-size:15px;font-weight:500;letter-spacing:.6px}
+.live-controls .cc-ui-card,.live-controls .cc-sync-account,.live-controls .cc-sources-page .cc-source-list,.content-task-row{
+  background:var(--ui-glass)!important;border:1px solid var(--ui-edge-soft)!important;border-radius:12px;
+  box-shadow:inset 0 1px 0 #e9f3ff0c,0 10px 32px #0004;
+}
+.live-controls .cc-ui-card{overflow:visible}
+.live-controls .cc-sync-account .cc-account-icon{background:linear-gradient(145deg,#b5d1fa12,#122038);color:#c9dcf8;border:1px solid #7a98bf58;border-radius:9px}
+.live-controls .cc-sources-page .cc-source-card{background:transparent!important;border-color:#7086a02c!important;border-radius:0;box-shadow:none}
+.live-controls .cc-source-card-line h3{font-size:14px;font-weight:500;letter-spacing:.3px;color:#e3edfc}
+.live-controls .cc-sources-page .cc-source-toggle{background:linear-gradient(#27384e,#172133);border-color:#7d90ab;box-shadow:inset 0 1px 3px #0005}
+.live-controls .cc-sources-page .cc-source-toggle[aria-checked=true]{background:linear-gradient(#d9e9ff,#adc7ed);border-color:#bdd5f7;box-shadow:0 0 10px #aacbff16}
+.live-controls .cc-sources-page .cc-source-toggle>span{background:linear-gradient(#edf4ff,#b9cce6);box-shadow:0 1px 2px #0004}
+.live-controls .cc-sources-page .cc-source-toggle[aria-checked=true]>span{background:#172c49}
+.live-controls .cc-status,.status{border-radius:5px;font-size:10px;letter-spacing:.15px}
+.live-controls .cc-source-more>div{background:linear-gradient(145deg,#172234,#090f1c);border-color:#869dbb72;border-radius:10px;box-shadow:inset 0 1px 0 #e6f1ff12,0 14px 45px #0008}
+.live-controls .cc-source-more>div>button{background:var(--ui-control)!important;border-color:#7086a070!important;color:#dfeafa!important;border-radius:6px}
+.live-controls .cc-source-more>div>button.cc-menu-danger{color:#efbfbd!important}
+.live-controls .cc-ui-dialog,.modal{background:linear-gradient(145deg,#172131,#080e19 80%)!important;border:1px solid #8da4c276;border-radius:14px;box-shadow:inset 0 1px 0 #e9f3ff1a,0 30px 100px #000a}
+.live-controls .cc-ui-dialog>div:first-child{padding-bottom:15px;border-bottom:1px solid #9ab4d32b}
+.live-controls .cc-ui-dialog>div:first-child h2{font-size:20px;font-weight:450;letter-spacing:1px}
+.live-controls .cc-sources-page .cc-source-add-row{background:linear-gradient(120deg,#20304780,#0c1625ca);border:1px solid #657c985c;border-radius:8px}
+.live-controls .cc-sources-page .cc-source-add-dialog .cc-evidence-tabs,.reading-surface .reader-tabs{background:#08111de6;border:1px solid #667d995c;border-radius:9px;box-shadow:inset 0 2px 5px #0003}
+.live-controls .cc-sources-page .cc-source-add-dialog .cc-evidence-tabs button[aria-selected=true],.reading-surface .reader-tabs button[aria-selected=true]{background:linear-gradient(#a7c6f02b,#344a671f)!important;border-color:#809cc18a!important;color:#ecf4ff!important;box-shadow:inset 0 1px 0 #e5f0ff1b}
+.live-controls .settings-tabs{border-bottom-color:#8098b535}
+.live-controls .settings-tabs button{background:transparent!important;border-radius:7px 7px 0 0;color:#aebbd0!important;letter-spacing:.3px}
+.live-controls .settings-tabs button[aria-selected=true]{background:linear-gradient(#a9c6ef17,#6785b40b)!important;border-color:#bed8ff!important;color:#eaf3ff!important}
+.live-controls [role=listbox]{background:#0b1421;border-radius:8px}
+.live-controls [role=option]{background:transparent!important;border:1px solid transparent;color:#d7e6fc}
+.live-controls [role=option][aria-selected=true]{background:#a2c4f01c!important;border-color:#819fc377!important}
+.scene-category{border-radius:10px;border-color:#859ebd5c;background:linear-gradient(140deg,#243347b3,#0a1221db);box-shadow:inset 0 1px 0 #e1edff12,0 10px 30px #0005;color:#e0ebfb}
+.scene-category:before{content:'';position:absolute;left:8px;top:13px;bottom:13px;width:1px;background:linear-gradient(transparent,#b8d1f14d,transparent);pointer-events:none}
+.scene-category:hover{border-color:#afc9ee91;background-color:#172941;box-shadow:inset 0 1px 0 #e8f3ff25,0 10px 30px #0005}
+.scene-category.active{border-color:#b6d0f4a1;background-color:#1c2d45;box-shadow:inset 0 1px 0 #edf6ff2e,0 0 25px #96b5e810}
+.category-name{font-size:12px;font-weight:500;letter-spacing:.4px;color:#e9f2ff}
+.category-name small,.category-meta{color:#a9b9d1}
+.category-planned{font-size:9px;letter-spacing:.8px;color:#a9b9d1}
+.scene-breadcrumb,.scene-hint,.core-caption{border-radius:8px;background:#0b1625a8;border-color:#819bc047;color:#afc2dd;box-shadow:inset 0 1px 0 #e5efff08}
+.reader-pane.reading-surface,.neural-library .workspace-panel>.reader-pane{border-radius:12px;border-color:#879db965;box-shadow:inset 0 1px 0 #e8f2ff10,0 15px 50px #0006}
+.reading-surface .reader-bar{border-bottom-color:#9ab4d329;background:linear-gradient(#1a263744,#0b142066)}
+.reading-surface .reader-bar .secondary{background:var(--ui-control);border-radius:7px;border-color:#8196b3;color:#dfeafa}
+.reading-surface .reading h1{font-weight:450;letter-spacing:.6px}
+.reading-surface .reading h2{letter-spacing:.3px}
+.reading-surface .cc-prompt-block,.reading-surface .cc-code-block{border-radius:8px;box-shadow:inset 0 1px 0 #e5efff08}
+.collection-shell .list-pane,.collection-shell .welcome-pane{border-radius:12px;border-color:#8298b357}
+.collection-shell .find{border-radius:8px;background:#091221;border-color:#7489a66b}
+.collection-shell .item.selected,.neural-leaf.selected{border-radius:9px;background:linear-gradient(120deg,#91b3e024,#101d31c7);border-color:#9ab9e294;box-shadow:inset 0 1px 0 #e9f3ff16}
+@media(min-width:801px) and (max-width:1050px){.top nav button{padding:10px;gap:6px}.top nav button small{display:none}.top nav .nav-copy{line-height:1.5}}
+@media(max-width:800px){.top nav{border-radius:10px}.top nav button{padding:8px 7px;gap:5px}.top nav .nav-copy{text-align:center}.top nav button .nav-glyph{width:12px;height:12px}.brand{font-size:14px}.top-end .icon{width:30px;height:30px;margin-left:4px}}
+@media(max-width:650px){.top nav button .nav-glyph{display:none}.brand-mark,.brand-mark .orbit-mark{width:28px;height:28px}.live-controls .cc-page-heading h1{font-size:24px}.top nav button{letter-spacing:0}.scene-category:before{left:4px;top:10px;bottom:10px}}

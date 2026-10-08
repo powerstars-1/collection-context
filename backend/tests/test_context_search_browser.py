@@ -145,7 +145,7 @@ def test_actual_owner_edit_preview_confirmation_and_stale_summary(tmp_path):
         item["id"],
         {
             kind: {"text": "原始" + kind, "processor_version": "fixture"}
-            for kind in ("screen", "summary", "readable")
+            for kind in ("screen", "summary")
         },
         expected_content_hash=item["content_hash"],
     )

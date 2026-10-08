@@ -15,6 +15,7 @@ from collection_context.sources.browser_source import DouyinBrowserSource
 from collection_context.sources.douyin import source_asset_identity
 from collection_context.sources.links import parse_link
 from collection_context.workflows.ingestion import IngestionWorkflow
+from collection_context.workflows.connection import ConnectionCatalog
 from collection_context.workflows.jobs import JobManager
 from collection_context.workflows.policy import execution_allowed
 
@@ -334,6 +335,8 @@ class SynchronizationWorkflow:
                 failure = error.as_dict()
 
                 def failed(state):
+                    if plan["kind"] != "creator":
+                        ConnectionCatalog.invalidate_in_state(state, plan["account_ref"], error.code)
                     state["scopes"][plan["scope_id"]].update(
                         status="blocked", complete=False, error=failure, observed_count=len(imported)
                     )

@@ -249,6 +249,73 @@ def test_download_uses_order_and_rejects_html_not_a_media_header():
     assert caught.value.code == "source_media_format"
 
 
+def test_frame_failure_does_not_discard_download_and_retry_reuses_original(tmp_path, monkeypatch):
+    from collection_context.processing.inputs import PreparedInputs
+    from collection_context.sources.douyin import source_asset_identity
+
+    store = LibraryStore.initialize(tmp_path / "new-library")
+    observed = normalize_item(raw_item())
+    media = b"\x00\x00\x00\x14ftypisom" + b"synthetic"
+    downloads = []
+
+    def fetch(_):
+        downloads.append(True)
+        return [(media, "video/mp4")]
+
+    def prepare(*args, **kwargs):
+        raise ContextError("frame_limit", "合成选帧上限")
+
+    monkeypatch.setattr(PreparedInputs, "prepare_video", prepare)
+    try:
+        workflow = IngestionWorkflow(store, SimpleNamespace(fetch_item=lambda _: observed), SimpleNamespace(fetch=fetch))
+        first = workflow.add_link("fixture", download=True)
+        assert first["download"] == "ready" and first["preparation"] == "blocked"
+        assert first["preparation_error"]["code"] == "frame_limit" and first["model_requests"] == 0
+        assert not store.get(first["material_ref"]).get("prepared_input")
+        assert PreparedInputs(store).source_media(first["material_ref"], source_asset_identity(observed)) == [(media, "video/mp4")]
+        from collection_context.application.library_management import LibraryManagement
+        management = LibraryManagement(store, authorize=lambda: None)
+        assert management.overview()["storage"]["media_bytes"] == len(media)
+        exported = management._export_files(store.snapshot(), first["material_ref"], "all")
+        assert media in exported.values() and "media-evidence.json" not in exported
+        second = workflow.add_link("fixture", download=True)
+        assert second["download"] == "ready" and second["download_reused"] and len(downloads) == 1
+    finally:
+        store.close()
+
+
+def test_expired_list_media_refreshes_only_exact_work_once(tmp_path, monkeypatch):
+    from collection_context.processing.inputs import PreparedInputs
+    observed = normalize_item(raw_item())
+    fresh = normalize_item(raw_item(video={"play_addr": {"url_list": ["https://fixture.douyinvod.com/fresh"]}}))
+    fetched, opened = [], []
+    store = LibraryStore.initialize(tmp_path / "new-library")
+
+    def fetch(item):
+        fetched.append(item)
+        if len(fetched) == 1:
+            raise PublicDownloadError(403)
+        return [(b"\x00\x00\x00\x14ftypisomsynthetic", "video/mp4")]
+
+    def reopen(url):
+        opened.append(url)
+        return fresh
+
+    def prepare(*args, **kwargs):
+        raise ContextError("frame_limit", "合成选帧上限")
+
+    monkeypatch.setattr(PreparedInputs, "prepare_video", prepare)
+    try:
+        result = IngestionWorkflow(store, SimpleNamespace(fetch_item=reopen), SimpleNamespace(fetch=fetch)).import_item(
+            observed, kind="saved", scope_id="s_saved", download=True,
+        )
+        assert result["download"] == "ready" and fetched == [observed, fresh]
+        assert opened == [observed.source["source_url"]] and result["model_requests"] == 0
+        assert len(store.get(result["material_ref"])["relations"]) == 1
+    finally:
+        store.close()
+
+
 def test_only_bounded_platform_offered_mirrors_are_used_after_cdn_rejection():
     item = normalize_item(
         raw_item(
@@ -265,7 +332,7 @@ def test_only_bounded_platform_offered_mirrors_are_used_after_cdn_rejection():
 
     result = DouyinDownloads(SimpleNamespace(get=get)).fetch(item)
     assert result[0][1] == "video/mp4" and len(calls) == 2
-    assert all(kwargs == {"timeout": 20} for _, kwargs in calls)
+    assert all(kwargs == {"timeout": 300, "max_bytes": 1_024_000_000} for _, kwargs in calls)
 
 
 @pytest.mark.parametrize(

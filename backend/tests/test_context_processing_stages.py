@@ -195,7 +195,8 @@ def test_summary_keeps_ocr_diagnostics_local_without_duplicate_raw_text_upload(s
     assert "ONLY_LOCAL_OCR" not in sent and "ocr_records" not in sent
     assert "ocr_failures" in sent and "f_000001" in sent and "ocr_calls" in sent
     stored = ContextService(store).read(material["id"], artifact="screen")["coverage"]
-    assert stored["source_coverage"]["ocr_records"] == coverage["ocr_records"]
+    assert stored["source_coverage"]["ocr_records_count"] == len(coverage["ocr_records"])
+    assert store.get(material["id"])["artifacts"]["summary"]["coverage"]["source_coverage"]["ocr_records"] == coverage["ocr_records"]
 
 
 def test_metadata_only_update_reuses_audio_vision_but_changes_summary(store):

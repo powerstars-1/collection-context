@@ -7,10 +7,12 @@ import ipaddress
 import socket
 import ssl
 import time
+import tempfile
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 
 from collection_context.application.contracts import ContextError
+from collection_context.infrastructure.download_limits import DEFAULT_DOWNLOAD_MB, MB, MAX_SOURCE_BYTES
 
 
 @dataclass(frozen=True)
@@ -64,9 +66,18 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 
 
 class PublicHTTP:
-    def __init__(self, *, hosts: frozenset[str], suffixes: frozenset[str] = frozenset()):
+    def __init__(self, *, hosts: frozenset[str], suffixes: frozenset[str] = frozenset(), user_agent: str = "CollectionContext/0.2", referer: str | None = None):
         self.hosts = hosts
         self.suffixes = suffixes
+        if not isinstance(user_agent, str) or not 1 <= len(user_agent) <= 500 or any(ord(c) < 32 or ord(c) > 126 for c in user_agent):
+            raise ContextError("invalid_download_headers", "下载客户端标识无效。")
+        # Only a fixed, public site origin is supported, never caller headers,
+        # private paths, signed queries, cookies or authorization passthrough.
+        if referer is not None:
+            parts = urlsplit(referer)
+            if parts.scheme != "https" or parts.hostname not in hosts or parts.path != "/" or parts.query or parts.fragment or parts.username or parts.password or parts.port not in {None, 443}:
+                raise ContextError("invalid_download_headers", "下载来源页须为允许的公开站点首页。")
+        self.user_agent, self.referer = user_agent, referer
 
     def validate(self, url: str) -> tuple[str, str]:
         try:
@@ -92,8 +103,8 @@ class PublicHTTP:
         except ValueError:
             raise ContextError("unsafe_public_url", "下载或跳转地址不在允许的公开HTTPS来源中。") from None
 
-    def get(self, url: str, *, max_bytes: int = 128_000_000, timeout: float = 60) -> Download:
-        if type(max_bytes) is not int or not 1 <= max_bytes <= 128_000_000 or not 0 < timeout <= 120:
+    def get(self, url: str, *, max_bytes: int = DEFAULT_DOWNLOAD_MB * MB, timeout: float = 60) -> Download:
+        if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_SOURCE_BYTES or not 0 < timeout <= 600:
             raise ContextError("invalid_download_limit", "下载大小或时限无效。")
         deadline = time.monotonic() + timeout
         for _ in range(6):
@@ -104,14 +115,13 @@ class PublicHTTP:
                 raise ContextError("download_timeout", "下载超时，未保存为完整媒体。", retryable=True)
             connection = _PinnedHTTPS(host, addresses[0], remaining)
             try:
+                headers = {"Host": host, "Accept-Encoding": "identity", "User-Agent": self.user_agent}
+                if self.referer:
+                    headers["Referer"] = self.referer
                 connection.request(
                     "GET",
                     path,
-                    headers={
-                        "Host": host,
-                        "Accept-Encoding": "identity",
-                        "User-Agent": "CollectionContext/0.2",
-                    },
+                    headers=headers,
                 )
                 response = connection.getresponse()
                 if response.status in {301, 302, 303, 307, 308}:
@@ -119,7 +129,7 @@ class PublicHTTP:
                     if not location:
                         raise ContextError("download_redirect_invalid", "来源跳转缺少目标。")
                     url = urljoin(url, location)
-                    # Validate the next hop before DNS or connect; never forward Cookie/Authorization/Referer.
+                    # Validate the next hop before DNS/connect; no Cookie or Authorization.
                     self.validate(url)
                     continue
                 if response.status != 200:
@@ -129,29 +139,31 @@ class PublicHTTP:
                         "download_encoding_unsupported", "来源返回压缩传输，未按不明大小解压。"
                     )
                 length = response.getheader("Content-Length")
-                if length is not None and (not length.isdigit() or int(length) > max_bytes):
-                    raise ContextError("download_limit", "媒体超过下载上限或长度无效，未截断保存。")
-                chunks, total = [], 0
-                while True:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError
-                    if connection.sock is not None:
-                        connection.sock.settimeout(remaining)
-                    chunk = response.read1(min(65_536, max_bytes + 1 - total))
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise ContextError("download_limit", "媒体超过下载上限，未保存不完整内容。")
-                if not total or (length is not None and total != int(length)):
-                    raise ContextError(
-                        "download_incomplete", "媒体为空或传输未完成，未登记为成功。", retryable=True
-                    )
-                return Download(
-                    b"".join(chunks), response.getheader("Content-Type", "").split(";", 1)[0].lower()
-                )
+                if length is not None and not length.isdigit():
+                    raise ContextError("download_limit", "来源媒体长度无效，未保存不完整文件。")
+                if length is not None and int(length) > max_bytes:
+                    raise ContextError("download_limit", f"原媒体超过单文件 {max_bytes // 1_000_000} MB 上限，文字已保存，未截断媒体。")
+                # Spool large transfers to disk instead of keeping chunks plus a
+                # second joined copy in RAM. Incomplete/oversize spools are removed.
+                with tempfile.SpooledTemporaryFile(max_size=8_000_000) as spool:
+                    total = 0
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError
+                        if connection.sock is not None:
+                            connection.sock.settimeout(remaining)
+                        chunk = response.read1(min(65_536, max_bytes + 1 - total))
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ContextError("download_limit", f"原媒体超过单文件 {max_bytes // 1_000_000} MB 上限，未保存不完整内容。")
+                        spool.write(chunk)
+                    if not total or (length is not None and total != int(length)):
+                        raise ContextError("download_incomplete", "媒体为空或传输未完成，未登记为成功。", retryable=True)
+                    spool.seek(0)
+                    return Download(spool.read(), response.getheader("Content-Type", "").split(";", 1)[0].lower())
             except ContextError:
                 raise
             except TimeoutError:

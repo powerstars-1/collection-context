@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import math
+import re
 import time
 import uuid
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from collection_context.application.contracts import ContextError
 
 MAX_INPUT_BYTES = 32_000_000
 MAX_RESPONSE_BYTES = 4_000_000
+COMPATIBLE_APIS = {"openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"}
 
 
 class SameOriginRedirect(HTTPRedirectHandler):
@@ -44,8 +46,17 @@ class ModelProfile:
     protocol: str = "chat"
     timeout: float = 120
     parameters: dict[str, Any] = field(default_factory=dict)
+    provider: str | None = None
+    api: str | None = None
 
     def __post_init__(self):
+        if self.api is not None and (
+            not isinstance(self.api, str) or self.api not in COMPATIBLE_APIS or self.protocol != "pi_chat" or self.provider is not None
+        ):
+            raise ContextError("unsupported_model_protocol", "自定义模型协议无效。")
+        if self.provider is not None:
+            if not isinstance(self.provider, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,99}", self.provider):
+                raise ContextError("invalid_model_config", "供应商标识无效。")
         url = urlsplit(self.base_url)
         if (
             url.scheme not in {"https", "http"}
@@ -66,7 +77,7 @@ class ModelProfile:
             or "\r" in self.api_key
         ):
             raise ContextError("invalid_model_config", "模型名或访问凭据无效。")
-        if self.protocol not in {"chat", "chat_audio", "transcription"}:
+        if self.protocol not in {"chat", "pi_chat", "chat_audio", "transcription"}:
             raise ContextError("unsupported_model_protocol", "请选择已实现的聊天、音频聊天或转写协议。")
         if not 1 <= self.timeout <= 600:
             raise ContextError("invalid_model_config", "请求超时须在 1 到 600 秒之间。")

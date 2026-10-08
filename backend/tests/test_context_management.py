@@ -150,7 +150,7 @@ def test_bounded_public_management_result_no_payload_or_credentials(env):
     assert len(data["jobs"]) == 20 and data["next_offset"] == 20 and data["total_jobs"] == 25
     assert len(manager.overview(offset=20)["jobs"]) == 5
     assert "secret-body-never-public" not in json.dumps(data)
-    assert "payload" not in data["jobs"][0] and "calls" not in data["jobs"][0]
+    assert "payload" not in data["jobs"][0] and data["jobs"][0]["calls"] == []
     limited = manager._automatic({"paused_job_ids": ["j_" + str(n) for n in range(30)], "paused_count": 30})
     assert len(limited["paused_job_ids"]) == 20 and limited["paused_count"] == 30
 

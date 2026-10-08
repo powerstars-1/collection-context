@@ -44,7 +44,7 @@ def env(tmp_path):
                 "processor_version": "fixture",
                 "coverage": {"complete": False, "missing_frames": ["f_000002"]},
             }
-            for kind in ("audio", "screen", "summary", "readable", "user_note")
+            for kind in ("audio", "screen", "summary", "user_note")
         },
         expected_content_hash=item["content_hash"],
     )
@@ -343,7 +343,7 @@ def test_source_changes_after_real_result_do_not_overwrite_but_keep_paid_usage(e
     assert len(sent) == 1
 
 
-@pytest.mark.parametrize("target", ["summary", "readable"])
+@pytest.mark.parametrize("target", ["summary"])
 def test_confirmed_manual_outputs_are_not_replaced(env, target):
     store, _, _, _, item, owner = env
     path = store.get(item["id"])["artifacts"][target]["path"]
@@ -502,7 +502,7 @@ def test_published_result_before_executor_checkpoint_recovers_without_second_cal
     monkeypatch.setattr(workflow.executor.jobs, "commit_stage_result", interrupt)
     with pytest.raises(KeyboardInterrupt):
         workflow.run(job["job_id"])
-    versions = {kind: store.get(item["id"])["artifacts"][kind]["version"] for kind in ("summary", "readable")}
+    versions = {kind: store.get(item["id"])["artifacts"][kind]["version"] for kind in ("summary",)}
     assert len(sent) == 1
     resumed = ExtractionWorkflow(store, secrets.get)
     BackgroundWorker(resumed).serve(allow_model_calls=True, once=True)

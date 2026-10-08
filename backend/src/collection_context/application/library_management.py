@@ -77,7 +77,20 @@ class LibraryManagement:
     def _media(self, state: dict[str, Any], item: dict[str, Any]) -> list[dict[str, Any]]:
         payload = self._media_manifest(state, item)
         if payload is None:
-            return []
+            saved = item.get("downloaded_media")
+            if not saved or saved.get("content_hash") != item["content_hash"] or saved.get("source_asset_hash") != item.get("source_asset_hash"):
+                return []
+            blobs = saved.get("originals")
+            if not isinstance(blobs, list) or not 1 <= len(blobs) <= 240:
+                raise ContextError("invalid_input", "原媒体清单无法识别。")
+            for blob in blobs:
+                if (
+                    not isinstance(blob, dict) or set(blob) != {"path", "sha256", "mime_type", "bytes"}
+                    or type(blob["bytes"]) is not int or not 0 < blob["bytes"] <= 2_048_000_000
+                    or blob["path"] != PreparedInputs._path(item["id"], blob["sha256"], blob["mime_type"])
+                ):
+                    raise ContextError("invalid_input", "原媒体不在本资料的有效快照中。")
+            return blobs
         blobs = [
             *payload["originals"],
             *(segment["blob"] for segment in payload["audio"]),
@@ -96,8 +109,8 @@ class LibraryManagement:
             raise ContextError("invalid_artifact", "未知产物类型。")
         names = dict(
             zip(
-                ("original", "audio", "screen", "summary", "readable", "image", "user_note"),
-                ("原文", "音频转写", "画面文字", "内容总结", "可读内容", "图片提取", "用户备注"),
+                ("original", "audio", "screen", "summary", "image", "user_note"),
+                ("原文", "音频转写", "画面文字", "内容总结", "图片提取", "用户备注"),
                 strict=True,
             )
         )
@@ -233,10 +246,8 @@ class LibraryManagement:
             raise ContextError("invalid_artifact", "修改正文为空或超过长度上限。")
         sha = hashlib.sha256(body).hexdigest()
         dependencies = (
-            {"summary", "readable"}
+            {"summary"}
             if kind in {"original", "audio", "screen", "image"}
-            else {"readable"}
-            if kind == "summary"
             else set()
         )
         return {

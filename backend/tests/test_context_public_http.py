@@ -97,6 +97,22 @@ def test_redirect_to_private_or_unlisted_host_is_rejected_before_connect(monkeyp
     assert caught.value.code == "unsafe_public_url" and len(opened) == 1 and opened[0].closed
 
 
+def test_static_public_origin_download_headers_never_include_secrets(monkeypatch):
+    _, requests = transport(monkeypatch, [{}])
+    PublicHTTP(hosts=frozenset({"www.douyin.com"}), suffixes=frozenset({"douyinvod.com"}),
+               user_agent="Mozilla/5.0", referer="https://www.douyin.com/").get("https://fixture.douyinvod.com/a")
+    headers = requests[0][2]
+    assert headers["User-Agent"] == "Mozilla/5.0" and headers["Referer"] == "https://www.douyin.com/"
+    assert set(headers) == {"Host", "Accept-Encoding", "User-Agent", "Referer"}
+
+
+@pytest.mark.parametrize("referer", ["https://www.douyin.com/private", "https://www.douyin.com/?secret=fixture", "https://foreign.example/", "https://user:secret@www.douyin.com/"])
+def test_download_referer_cannot_carry_private_path_or_credentials(referer):
+    with pytest.raises(ContextError) as caught:
+        PublicHTTP(hosts=frozenset({"www.douyin.com"}), referer=referer)
+    assert caught.value.code == "invalid_download_headers"
+
+
 def test_each_redirect_gets_its_own_checked_dns_and_host_header(monkeypatch):
     opened, requests = transport(
         monkeypatch, [{"status": 302, "headers": {"Location": "https://other.example/b"}}, {}]

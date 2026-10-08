@@ -11,7 +11,7 @@ from collection_context.application.contracts import ContextError, digest, utc_n
 from collection_context.library.store import LibraryStore
 from collection_context.processing.models import CloudModelClient, ModelProfile
 
-ROLES = {"audio": {"chat_audio", "transcription"}, "vision": {"chat"}, "summary": {"chat"}}
+ROLES = {"audio": {"chat_audio", "transcription"}, "vision": {"chat", "pi_chat"}, "summary": {"chat", "pi_chat"}}
 FIELDS = {
     "schema_version",
     "role",
@@ -26,8 +26,11 @@ _UNSET = object()
 
 
 def validated(value: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != FIELDS or value.get("schema_version") != 1:
+    if not isinstance(value, dict) or not FIELDS <= set(value) <= FIELDS | {"provider", "api"} or value.get("schema_version") != 1:
         raise ContextError("invalid_model_config", "模型角色配置结构或版本不兼容。")
+    if "provider" in value:
+        if value.get("protocol") != "pi_chat":
+            raise ContextError("model_capability_required", "原生供应商只能用于 SDK 内容理解接口。")
     role = value["role"]
     if (
         not isinstance(role, str)
@@ -82,6 +85,8 @@ def validated(value: dict[str, Any]) -> dict[str, Any]:
             protocol=value["protocol"],
             parameters=parameters,
             timeout=value["timeout"],
+            provider=value.get("provider"),
+            api=value.get("api"),
         )
     except (TypeError, ValueError):
         raise ContextError("invalid_model_config", "模型地址或参数无效；未回显配置内容。") from None
@@ -168,8 +173,11 @@ class ModelCatalog:
 
     def client(self, identity: str, resolve_secret: Callable[[str], str]) -> CloudModelClient:
         profile = self.get(identity)
+        from collection_context.processing.pi_client import PiModelClient
+
+        client_type = PiModelClient if profile["protocol"] == "pi_chat" else CloudModelClient
         # Secrets are resolved only from an explicitly supplied backend, never from environment/legacy config.
-        return CloudModelClient(
+        return client_type(
             ModelProfile(
                 profile["base_url"],
                 profile["model"],
@@ -177,6 +185,8 @@ class ModelCatalog:
                 protocol=profile["protocol"],
                 parameters=profile["parameters"],
                 timeout=profile["timeout"],
+                provider=profile.get("provider"),
+                api=profile.get("api"),
             )
         )
 

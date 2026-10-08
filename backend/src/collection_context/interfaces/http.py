@@ -125,7 +125,8 @@ class HttpBoundary:
         ):
             await self.deny(send, "rate_limited", "登录尝试过于频繁，请稍后再试。", 429)
             return
-        protected = path.startswith("/v1/") and not (path == "/v1/session" and method == "POST")
+        local_entry = path == "/v1/session" and method == "GET" and self.policy.local_ui and "authorization" not in headers
+        protected = path.startswith("/v1/") and not (path == "/v1/session" and method == "POST") and not local_entry
         if protected:
             try:
                 session = None
@@ -651,6 +652,16 @@ def create_app(
     async def session_info(request):
         if request.query_params:
             raise ContextError("invalid_argument", "会话接口不接收查询参数。")
+        if policy.local_ui and not request.headers.get("authorization"):
+            try:
+                credential, session = policy.session(request.cookies.get(COOKIE_NAME))
+                return result_response(envelope(public_session(credential, session)))
+            except ContextError:
+                token, session = policy.create_session(policy.local_owner)
+                response = result_response(envelope(public_session(policy.local_owner, session)))
+                response.set_cookie(COOKIE_NAME, token, max_age=policy.session_seconds,
+                    path="/", httponly=True, secure=False, samesite="strict")
+                return response
         return result_response(envelope(public_session(request.state.credential, request.state.session)))
 
     session_info.__annotations__["request"] = Request

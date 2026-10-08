@@ -273,7 +273,7 @@ def local_media(path: Path) -> tuple[bytes, str]:
     if mime is None:
         raise ContextError("unsupported_media", "请选择受支持的视频或静态原图。")
     with SafeFiles(path.absolute().parent) as files:
-        return files.read(path.name, max_bytes=128_000_000), mime
+        return files.read(path.name, max_bytes=2_048_000_000), mime
 
 
 def no_model_authority(_: str) -> str:

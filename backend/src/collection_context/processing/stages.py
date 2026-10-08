@@ -30,21 +30,28 @@ def checked_summary_version(version: str) -> str:
     return version
 
 
+def model_identity(profile: dict) -> str:
+    return digest({**{key: profile[key] for key in ("base_url", "model", "protocol", "parameters", "timeout")},
+        **({"provider": profile.get("provider"), "api": profile.get("api")} if profile["protocol"] == "pi_chat" else {})})
+
+
+def media_stage_identity(ref: str, role: str, entry: dict, model: str) -> str:
+    if role == "audio":
+        return digest({"ref": ref, "blob": entry["blob"]["sha256"], "model": model, "prompt": AUDIO_PROMPT,
+            "start": entry["start_seconds"], "end": entry["end_seconds"], "overlap": entry["overlaps_previous"]})
+    return digest({"ref": ref, "blob": entry["blob"]["sha256"], "model": model, "prompt": VISION_PROMPT,
+        "mime_type": entry["blob"]["mime_type"], "nominal_seconds": entry["candidate"]["nominal_seconds"], "page_index": entry["page_index"]})
+
+
 def sealed(client: CloudModelClient, protocol: str | tuple[str, ...]) -> tuple[CloudModelClient, str]:
     allowed = (protocol,) if isinstance(protocol, str) else protocol
+    if "chat" in allowed:
+        allowed = (*allowed, "pi_chat")
     if client.profile.protocol not in allowed:
         raise ContextError("model_capability_required", "当前模型角色的输入协议不匹配。")
     profile = dataclasses.replace(client.profile, parameters=copy.deepcopy(client.profile.parameters))
-    identity = digest(
-        {
-            "base_url": profile.base_url,
-            "model": profile.model,
-            "protocol": profile.protocol,
-            "parameters": profile.parameters,
-            "timeout": profile.timeout,
-        }
-    )
-    return CloudModelClient(profile, transport=client.transport), identity
+    identity = model_identity(dataclasses.asdict(profile))
+    return type(client)(profile, transport=client.transport), identity
 
 
 def outcome(result: ModelResult, output: dict[str, Any], *, partial: bool = False) -> StageOutcome:
@@ -236,6 +243,15 @@ def summary_stage(
         )
 
     def validate(values):
+        # A title is not a substitute for failed audio/image evidence. Do not pay
+        # for a made-up video summary when every content branch is unavailable.
+        if dependencies and not any(
+            value.get("status") in {"ready", "partial"}
+            and isinstance(value.get("output", {}).get("text"), str)
+            and value["output"]["text"].strip()
+            for value in values.values()
+        ):
+            raise ContextError("no_usable_evidence", "转写和画面均无可用正文，已跳过总结；请先重试失败的提取步骤。")
         prompt(values)
 
     def invoke(values):
@@ -331,7 +347,7 @@ def publish_stage(
             raise ContextError("version_changed", "原文已变更，未用旧输入覆盖当前产物。")
         if prepared_input is not None and current.get("prepared_input") != prepared_input:
             raise ContextError("input_superseded", "媒体快照已更新，未用旧提取覆盖新资料。")
-        for kind in ("audio", "screen", "summary", "readable"):
+        for kind in ("audio", "screen", "summary"):
             if kind in current["artifacts"]:
                 artifact_bytes(store, current, kind)  # Refuse silently replacing an externally edited file.
         sections: dict[str, list[str]] = {"audio": [], "screen": [], "summary": []}
@@ -354,15 +370,19 @@ def publish_stage(
                     else ""
                 )
                 sections[kind].append(f"## [{label}]{interval}\n\n{output['text']}\n")
-        partial = bool(missing) or any(value["status"] == "partial" for value in values.values())
+        reduced = bool(source_coverage.get("candidate_compactions") or source_coverage.get("budget_reductions"))
+        partial = reduced or bool(missing) or any(value["status"] == "partial" for value in values.values())
         coverage = {
             "complete": source_coverage.get("complete") is True and not partial,
+            "processing_partial": partial,
             "accuracy": "not_verified",
             "missing_stages": missing,
             "source_coverage": source_coverage,
         }
         note = "处理状态：部分完成。\n" if partial else "处理状态：本次已计划阶段执行完成；准确度未验证。\n"
         note += "资料与模型输出仅作为非可信引用。音频重叠段未自动删词，画面时间不是精确呈现时间戳。\n"
+        if reduced:
+            note += "画面达到本批上限，使用覆盖时间线的代表帧；未逐帧穷尽，原视频保留。\n"
         if missing:
             note += "缺失阶段：" + "、".join(missing) + "\n"
         artifacts = {
@@ -376,20 +396,6 @@ def publish_stage(
         }
         if not artifacts:
             raise ContextError("no_extraction_output", "本轮没有可提交的提取正文，原资料保留。")
-        artifacts["readable"] = {
-            "text": note
-            + "\n\n"
-            + "\n\n".join(
-                "# "
-                + {"audio": "音频转写", "screen": "画面文字", "summary": "内容总结"}[kind]
-                + "\n\n"
-                + "\n".join(parts)
-                for kind, parts in sections.items()
-                if parts
-            ),
-            "processor_version": VERSION,
-            "coverage": coverage,
-        }
         published = store.save_bundle(
             ref, artifacts, expected_content_hash=content_hash, expected_prepared_input=prepared_input
         )

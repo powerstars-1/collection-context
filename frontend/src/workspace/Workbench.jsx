@@ -1,0 +1,113 @@
+import {Fragment,useEffect,useRef,useState} from 'react';
+import {ArrowLeft,ArrowRight,Bookmark,Check,ChevronRight,Clock,Folder,Heart,Link2,Search,Settings2,Sparkles,Video,X,Orbit,PenLine,Lightbulb} from 'lucide-react';
+import {createApi} from '../api';
+import {Sources} from '../management/Sources';
+import {Tasks} from '../management/Tasks';
+import {ModelSettings,ProcessingSettings,StorageSettings} from '../management/Settings';
+import {ItemTools,ExcludedItems} from '../LibraryTools';
+import {Access} from '../Access';
+import {Dialog,useData} from '../ui';
+import {NeuralWorkspace} from './NeuralWorkspace';
+import {CollectionFolderPicker} from './CollectionFolderPicker';
+import {useSourceScopes} from './useSourceScopes';
+import {collectionFolders,folderLabel} from './collectionFolders.mjs';
+import {WorkspaceSurface,ScenePanel} from './WorkspaceSurface';
+import {ModulePreview} from './ModulePreview';
+import {useWorkspaceRoute} from './useWorkspaceRoute';
+import {modules,parseRoute,activeNavigation,topNavigation,expandedReadingHash} from './structure.mjs';
+import {activeJob,sourceNames,legacyRoute,copyEvidence} from './presentation.mjs';
+import {useLibrary,useArtifact} from './useLibrary';
+import {Reader} from './Reader';
+import {Extraction} from './Extraction';
+import {CosmicBackdrop} from './CosmicBackdrop';
+import './preview.css';
+import './flow.css';
+import './workspace-library.css';
+import './live.css';
+import './cosmos.css';
+import './atmosphere.css';
+import './space-ui.css';
+import './collection-folders.css';
+
+function route(){return parseRoute(location.hash||legacyRoute(location.pathname,location.search))}
+const sourceIcons={all:Bookmark,saved:Bookmark,liked:Heart,collection:Folder,creator:Video,link:Link2};
+const navigationIcons={workspace:Orbit,works:Video,drafts:PenLine,ideas:Lightbulb,library:Bookmark};
+
+function OrbitMark(){return <svg className="orbit-mark" viewBox="0 0 40 40" fill="none" aria-hidden="true"><circle cx="20" cy="20" r="13" stroke="currentColor" strokeOpacity=".28" strokeWidth=".8"/><ellipse cx="20" cy="20" rx="17" ry="6.5" transform="rotate(-35 20 20)" stroke="currentColor" strokeWidth=".9"/><path d="M20 12v16M12 20h16" stroke="currentColor" strokeOpacity=".55" strokeWidth=".8"/><circle cx="20" cy="20" r="2.5" fill="currentColor"/><circle cx="32.7" cy="11.1" r="1.4" fill="currentColor"/></svg>}
+
+export default function Workbench(){
+  const [session,setSession]=useState(null),[error,setError]=useState(''),[loading,setLoading]=useState(true),[revision,setRevision]=useState(0);
+  const [client]=useState(()=>createApi(()=>{setSession(null);setError('连接已失效，请重新连接。')}));
+  useEffect(()=>{let alive=true;setLoading(true);setError('');client.request('/v1/session').then(value=>{if(alive){client.setSession(value);setSession(value)}}).catch(err=>{if(alive)setError(err.message)}).finally(()=>{if(alive)setLoading(false)});return()=>{alive=false}},[client,revision]);
+  if(!session)return <div className="connection-screen"><Sparkles size={28}/><h1>{loading?'正在连接收藏库':'暂时无法连接收藏库'}</h1><p>{error||'读取本地资料和配置，不会自动调用模型。'}</p>{!loading&&<button className="primary" onClick={()=>setRevision(v=>v+1)}>重新连接</button>}{!loading&&!['localhost','127.0.0.1','[::1]'].includes(location.hostname)&&<form onSubmit={async event=>{event.preventDefault();const field=event.currentTarget.elements.namedItem('token');const token=field.value;field.value='';try{const result=await client.request('/v1/session',{token});client.setSession(result);setSession(result)}catch(err){setError(err.message)}}}><label>访问口令<input name="token" type="password" autoComplete="off" required/></label><button className="primary">连接</button></form>}</div>;
+  return <ConnectedWorkspace client={client} session={session}/>;
+}
+
+function ConnectedWorkspace({client,session}){
+  const api=client.request,canManage=session.permissions.includes('ui:manage')&&session.library_mode!=='legacy_readonly';
+  const initial=new URLSearchParams(location.search);
+  const [locationState,workspaceExit]=useWorkspaceRoute(route),[query,setQuery]=useState(initial.get('q')||''),[source,setSource]=useState(initial.get('kind')||'all'),[scope,setScope]=useState(initial.get('scope')||'');
+  const [filter,setFilter]=useState('all'),[libraryView,setLibraryView]=useState('list'),[tab,setTab]=useState('summary');
+  const [notice,setNotice]=useState(''),[modal,setModal]=useState(null),[url,setUrl]=useState(''),[linkError,setLinkError]=useState(''),[submitting,setSubmitting]=useState(false),[linkJob,setLinkJob]=useState(null);
+  const [dirty,setDirty]=useState(false),[drafts,setDrafts]=useState({}),[cosmosPaused,setCosmosPaused]=useState(false);
+  const sceneScroll=useRef(0),returns=useRef({}),key=useRef(crypto.randomUUID()),submittingRef=useRef(false),pendingSettings=useRef(null),priorRef=useRef(null);
+  const page=locationState.page,selectedRef=['workspace','library','ai'].includes(page)?locationState.id:'',focus=!!locationState.expanded;
+  const library=useLibrary(api,{query,source,scope,selectedRef,canManage,pollJobs:page!=='tasks'});
+  const sourceCatalog=useSourceScopes(api,canManage);
+  const folders=collectionFolders(sourceCatalog.scopes,library.overview?.scope_coverage?.scopes);
+  const currentFolder=folders.find(folder=>folder.id===scope);
+  const scopeTitle=sourceCatalog.scopes.find(row=>row.scope_id===scope)?.title;
+  const selected=library.selected,view=page==='workspace'?'canvas':libraryView,activeModule=page==='library'?'library':locationState.module;
+  const planned=modules.find(x=>x.id===(page==='workspace'?activeModule:page)&&x.planned);
+  const items=library.items.filter(x=>filter==='all'||filter==='readable'&&x.hasReading||filter==='pending'&&!x.hasReading);
+  const running=library.jobs.filter(activeJob).length;
+  useEffect(()=>{const adapt=()=>{if(location.pathname==='/'&&!location.search)return;const params=new URLSearchParams(location.search);setSource(params.get('kind')||'all');setScope(params.get('scope')||'');setQuery(params.get('q')||'');const next=legacyRoute(location.pathname,location.search);history.replaceState({},'','/'+next);window.dispatchEvent(new HashChangeEvent('hashchange'))};adapt();window.addEventListener('popstate',adapt);return()=>window.removeEventListener('popstate',adapt)},[]);
+  useEffect(()=>{if(priorRef.current!==selectedRef||locationState.tab){setTab(locationState.tab||'summary');setDirty(false);priorRef.current=selectedRef}},[selectedRef,locationState.tab]);
+  useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),6500);return()=>clearTimeout(timer)},[notice]);
+  useEffect(()=>{if(!dirty)return;const handler=e=>{e.preventDefault();e.returnValue=''};window.addEventListener('beforeunload',handler);return()=>window.removeEventListener('beforeunload',handler)},[dirty]);
+  const linkProgress=useData(api,'/v1/management/link-status',{job_id:linkJob?.job_id},{enabled:activeJob(linkJob),poll:data=>activeJob(data)?3000:false});
+  useEffect(()=>{const data=linkProgress.data;if(!data||data.job_id!==linkJob?.job_id)return;setLinkJob(data);if(!activeJob(data)){library.refresh();const ref=data.link_result?.material_ref;if(ref){setNotice(data.state==='succeeded'?'链接已保存，可以查看内容。':'作品已保存，部分步骤待处理。');if(location.hash==='#library'||location.hash==='')location.hash='library/'+encodeURIComponent(ref)}else setLinkError(data.error_message||'链接未能保存，请查看任务。')}},[linkProgress.data]);
+  useEffect(()=>{if(linkProgress.error)setLinkError(linkProgress.error)},[linkProgress.error]);
+  function protect(action){if(dirty){setModal({kind:'unsaved',action});return}action()}
+  function go(next,id=''){protect(()=>{location.hash=next+(id?'/'+id:'')})}
+  function sourceClick(value){protect(()=>{setSource(value);setScope('');if(selectedRef)location.hash=page==='workspace'?'workspace/library':'library'})}
+  function folderClick(value){protect(()=>{setSource('collection');setScope(value);sceneScroll.current=0;if(selectedRef)location.hash=page==='workspace'?'workspace/library':'library'})}
+  const folderPicker=source==='collection'?<CollectionFolderPicker folders={folders} value={scope} onChange={folderClick} busy={sourceCatalog.busy} error={sourceCatalog.error} onRetry={sourceCatalog.refresh}/>:null;
+  function utility(next,id=''){if(next==='tasks'&&!id)id=selectedRef||modal?.item?.id||'';protect(()=>{returns.current[next]={hash:location.hash,query,source,scope,filter,libraryView};location.hash=next+(id?'/'+encodeURIComponent(id):'')})}
+  function restore(which){protect(()=>{const saved=returns.current[which];if(!saved){location.hash='library';return}setQuery(saved.query);setSource(saved.source);setScope(saved.scope);setFilter(saved.filter);setLibraryView(saved.libraryView);location.hash=saved.hash})}
+  function expand(){protect(()=>{returns.current.reader={hash:location.hash};setLibraryView('list');location.hash=expandedReadingHash(selected.id)})}
+  function backReader(){if(focus&&returns.current.reader){go(returns.current.reader.hash.slice(1));return}go(page==='workspace'?'workspace':'library',page==='workspace'?'library':focus?encodeURIComponent(selected.id):'')}
+  async function save(event){event.preventDefault();if(submittingRef.current||!url.trim())return;protect(async()=>{submittingRef.current=true;setSubmitting(true);setLinkError('');try{const preferences=await api('/v1/management/preferences',{});const job=await api('/v1/management/link-submit',{url:url.trim(),download:preferences.download_media,idempotency_key:key.current,source_confirmed:true});setLinkJob(job);key.current=crypto.randomUUID();setUrl('');setNotice('已交给后台保存，可在任务中查看进度。');library.refresh()}catch(err){setLinkError(err.message)}finally{submittingRef.current=false;setSubmitting(false)}})}
+  function process(){if(!canManage)return;protect(()=>setModal({kind:'extract',item:selected}))}
+  const body=<>
+    {view==='list'&&!focus&&<aside className="sources" aria-label="资料来源"><div className="side-title">我的资料</div>{Object.entries(sourceNames).map(([id,name])=>{const Icon=sourceIcons[id];return <Fragment key={id}><button className={source===id&&!scope?'active':''} onClick={()=>sourceClick(id)}><Icon size={16}/><span>{name}</span><small>{id==='all'?library.overview?.total_items??'—':library.overview?.source_counts?.[id]??'—'}</small></button>{id==='collection'&&folders.length>0&&<div className="folder-children" aria-label="具体收藏夹">{folders.map(folder=><button key={folder.id} aria-current={source==='collection'&&scope===folder.id?'true':undefined} title={folderLabel(folder)} onClick={()=>folderClick(folder.id)}><Folder size={13}/><span>{folderLabel(folder)}</span></button>)}</div>}</Fragment>})}<div className="side-bottom"><p className="rail-signature">CREATIVE<br/><span>WORKSPACE</span></p>{canManage&&<button onClick={()=>utility('sync')}>管理同步来源 <ArrowRight size={14}/></button>}</div></aside>}
+    <WorkspaceSurface canvas={view==='canvas'} selection={selectedRef||planned} detail={!!selectedRef} exit={workspaceExit}>
+      {view==='canvas'&&!focus&&<NeuralWorkspace paused={cosmosPaused} onPauseChange={setCosmosPaused} detailOpen={!!selectedRef&&workspaceExit!=='reader'} returning={workspaceExit==='overview'} initialScroll={sceneScroll.current} onScrollPosition={v=>{sceneScroll.current=v}} allItems={library.items} totalCount={library.overview?.total_items} items={items} selected={selected} source={source} scope={scope} folderPicker={folderPicker} module={activeModule} onSource={sourceClick} onExpand={id=>go('workspace',id)} onOverview={()=>go('workspace')} onOpen={id=>go(page==='workspace'?'workspace':'library',(page==='workspace'?'library/':'')+encodeURIComponent(id))} onLibrary={()=>{setLibraryView('list');go('library')}} onSync={()=>utility('sync')} query={query} onQuery={setQuery} filter={filter} onFilter={setFilter} hasMore={library.listing?.next_offset!=null} onLoadMore={library.loadMore} busy={library.busy}/>}
+      {planned&&<ScenePanel canvas={view==='canvas'}><ModulePreview key={planned.id} id={planned.id} compact onGo={go} onClose={()=>go('workspace')}/></ScenePanel>}
+      {view==='list'&&!focus&&<section className="list-pane" aria-label="收藏列表"><div className="list-heading"><div><h1>{scope?(currentFolder?folderLabel(currentFolder):scopeTitle||'当前来源'):sourceNames[source]||'收藏库'}</h1><p>{library.listing?.total_items??library.listing?.total_matches??'—'} 条 · 已加载 {library.items.length} 条</p></div><button className="secondary compact" onClick={library.refresh} disabled={library.busy}>刷新</button></div>
+        <label className="mobile-source">来源<select aria-label="选择资料来源" value={source} onChange={e=>sourceClick(e.target.value)}>{Object.entries(sourceNames).map(([id,name])=><option value={id} key={id}>{name}</option>)}</select></label><div className="find"><Search size={16}/><input aria-label="搜索收藏" placeholder="搜索标题、工具或笔记" value={query} onChange={e=>setQuery(e.target.value)}/>{query&&<button aria-label="清除搜索" onClick={()=>setQuery('')}><X size={14}/></button>}</div>
+        {folderPicker}<div className="filters" aria-label="内容状态">{[['all','全部'],['readable','可阅读'],['pending','待处理']].map(([id,name])=><button key={id} aria-pressed={filter===id} onClick={()=>setFilter(id)}>{name}</button>)}</div>
+        <div className="item-scroll"><div className="list-caption">{query?'搜索结果':'最近保存'}<span>{items.length} 条{filter!=='all'?' · 已加载范围':''}</span></div>{library.busy&&library.firstLoad&&<p className="loading-copy">正在读取收藏…</p>}{!library.busy&&!items.length&&!library.error&&<div className="empty"><Bookmark size={27}/><h2>{query?'没有找到这条内容':'这里还没有内容'}</h2><p>{query?'试试作者、工具名，或更短的关键词。':'粘贴链接保存，或者同步你的抖音收藏。'}</p><button className="secondary" onClick={query?()=>setQuery(''):()=>document.querySelector('[aria-label="添加抖音链接"]')?.focus()}>{query?'清除搜索':'添加链接'}</button></div>}{items.map(item=><button className={'item '+(selected?.id===item.id?'selected':'')} key={item.id} aria-label={'阅读 '+item.title} aria-current={selected?.id===item.id?'true':undefined} onClick={()=>go('library',encodeURIComponent(item.id))}><div className="item-top"><span className="item-placeholder"><Video size={19}/></span><div><h2>{item.title}</h2><p>{item.author} <span>· {item.date}</span></p></div></div>{item.excerpt&&<p className="excerpt">{item.excerpt}</p>}<div className="item-meta"><span className={'status '+item.state}><i/>{item.stateLabel}</span><span>{item.sources.map(k=>sourceNames[k]).join(' / ')}</span><ChevronRight size={14}/></div></button>)}{library.listing?.next_offset!=null&&<button className="secondary load-more" disabled={library.busy} onClick={library.loadMore}>加载更多</button>}</div>
+        <div className="list-foot"><span>内容留在本地</span>{canManage&&<button className="text-button" onClick={()=>setModal({kind:'hidden'})}>已隐藏资料</button>}</div>
+      </section>}
+      <ScenePanel canvas={view==='canvas'}>{selected?<Reader key={selected.id} api={api} loadImage={client.image} item={selected} view={view} focus={focus} tab={tab} onTab={value=>protect(()=>setTab(value))} onBack={backReader} onExpand={expand} onCollapse={()=>go('library',encodeURIComponent(selected.id))} onAI={()=>utility('ai',selected.id)} onMore={()=>protect(()=>setModal({kind:'more',item:selected}))} onProcess={process} onTasks={()=>utility('tasks')} onNotice={setNotice} canManage={canManage} draft={drafts[selected.id]} onDraft={value=>setDrafts(old=>({...old,[selected.id]:value}))} onDirty={setDirty} onChanged={library.refresh}/>:selectedRef?<section className="reader-pane reading-surface"><p className="loading-copy" role={library.detailError?'alert':'status'}>{library.detailError||'正在打开内容…'}</p><button className="text-button" onClick={backReader}>返回收藏库</button></section>:view==='list'?<section className="welcome-pane"><div className="orbit" aria-hidden="true"><div/><span><Bookmark size={28}/></span><i/><b/></div><div className="eyebrow">YOUR SECOND LOOK</div><h2>看过的好内容，<br/>值得再用一次。</h2><p>选择一条收藏，接着阅读。<br/>总结、转写和原始画面，都在同一个地方。</p>{items.length>0&&<button className="primary" onClick={()=>go('library',encodeURIComponent(items[0].id))}>打开最近一条 <ArrowRight size={15}/></button>}<div className="welcome-bottom"><span>保存</span><ChevronRight size={14}/><span>读懂</span><ChevronRight size={14}/><span>再使用</span></div></section>:null}</ScenePanel>
+    </WorkspaceSurface>
+  </>;
+  return <><a className="skip" href="#main">跳到主要内容</a><div className="prototype-bar"><span><i/>{session.library_mode==='legacy_readonly'?'旧资料库 · 只读':'本地收藏库'}<span className="bar-detail">· {library.overview?.total_items??'—'} 条资料</span></span><span>{running?running+' 个任务进行中':'本地服务已连接'}</span></div>
+    <div className={'shell '+(page==='workspace'?'workspace-shell':page==='library'?'collection-shell':'')}><CosmicBackdrop tone={focus||selectedRef?'reading':page==='workspace'?'workspace':page==='library'?'library':'utility'} paused={cosmosPaused}/><header className="top"><button className="brand" onClick={()=>go('workspace')}><span className="brand-mark"><OrbitMark/></span><span>创作空间<small>CREATIVE WORKSPACE</small></span></button><nav aria-label="主导航">{topNavigation.map(([id,name,en])=>{const NavIcon=navigationIcons[id];return <button key={id} className={activeNavigation(page)===id?'active':''} onClick={()=>go(id)}><NavIcon className="nav-glyph" aria-hidden="true"/><span className="nav-copy">{name}<small>{en}</small></span></button>})}</nav><div className="top-end">{canManage&&<button className="icon" aria-label="任务状态" onClick={()=>utility('tasks')}><Clock size={18}/>{running>0&&<i className="task-dot"/>}</button>}<button className="icon" aria-label="设置" onClick={()=>utility('settings','models')}><Settings2 size={18}/></button></div></header>
+      {page==='library'&&!focus&&canManage&&<div className="capture"><Link2 size={18}/><form onSubmit={save} onKeyDown={event=>{if(event.key==='Enter'&&event.nativeEvent.isComposing)event.preventDefault()}}><input aria-label="添加抖音链接" placeholder="粘贴抖音链接或分享文字，保存到这里…" value={url} maxLength={8192} onChange={e=>{setUrl(e.target.value);setLinkError('')}}/><button className="primary compact" disabled={!url.trim()||submitting} type="submit">{submitting?'正在提交…':'保存链接'} <ArrowRight size={15}/></button></form><div className="capture-actions"><button className="secondary compact" onClick={()=>utility('sync')}>同步抖音</button><button className="text-button" onClick={()=>protect(()=>setLibraryView(libraryView==='list'?'canvas':'list'))}>{libraryView==='list'?'画布视图':'列表视图'}</button></div></div>}
+      {(library.error||linkError)&&<p role="alert" className="inline-error">{linkError||library.error}<button className="text-button" onClick={library.refresh}>重新读取</button></p>}
+      {page==='library'&&linkJob&&<div className="link-progress" role="status">{activeJob(linkJob)?'链接正在保存，关闭页面不会丢失任务。':linkJob.error_message||'链接任务已结束。'}<button className="text-button" onClick={()=>utility('tasks')}>查看任务</button>{linkJob.link_result?.material_ref&&<button className="text-button" onClick={()=>go('library',encodeURIComponent(linkJob.link_result.material_ref))}>查看这条内容</button>}</div>}
+      <main id="main" tabIndex={-1} className={'main '+(focus?'focused':'')}>{['workspace','library'].includes(page)?body:planned?<div className="page-scroll"><div className="planned-page"><ModulePreview id={planned.id} onGo={go} onClose={()=>go('workspace')}/></div></div>:<div className="page-scroll live-controls"><div className="utility"><button className="text-button utility-back" onClick={()=>restore(page)}><ArrowLeft size={14}/>返回发起位置</button>{page==='ai'?<Handoff api={api} item={selected} legacyReadonly={!canManage} onNotice={setNotice}/>:!canManage?<p>当前资料库为只读，可搜索和阅读已有内容。</p>:page==='sync'?<Sources api={api}/>:page==='tasks'?<Tasks api={api} onJobs={library.acceptJobs}/>:<><div className="settings-tabs" role="tablist" aria-label="设置分类">{[['models','模型服务'],['processing','处理设置'],['storage','资料与用量'],['ai','AI 接入']].map(([id,name])=><button key={id} role="tab" aria-selected={(locationState.id||'models')===id} onClick={()=>go('settings',id)}>{name}</button>)}</div>{locationState.id==='processing'?<ProcessingSettings api={api}/>:locationState.id==='storage'?<StorageSettings api={api} download={client.download} />:locationState.id==='ai'?<Access api={api}/>:<ModelSettings api={api}/>}<button className="secondary" onClick={()=>{library.refresh();restore('settings');if(pendingSettings.current){setModal({kind:'extract',item:pendingSettings.current});pendingSettings.current=null}}}>完成设置并返回</button></>}</div></div>}</main>
+    </div>
+    {notice&&<div className="toast" role="status"><Check size={16}/><span>{notice}</span><button aria-label="关闭提示" onClick={()=>setNotice('')}><X size={14}/></button></div>}
+    {modal?.kind==='extract'&&<div className="live-controls"><Extraction api={api} item={modal.item} onClose={()=>setModal(null)} onChanged={library.refresh} onNotice={setNotice} onTasks={()=>{setModal(null);utility('tasks')}} onSettings={()=>{pendingSettings.current=modal.item;setModal(null);utility('settings','models')}}/></div>}
+    {modal&&modal.kind!=='extract'&&<div className="live-controls"><Dialog title={{more:'资料操作',hidden:'已隐藏资料',unsaved:'备注尚未保存'}[modal.kind]} onClose={()=>setModal(null)}>{modal.kind==='more'?<ItemTools initiallyOpen api={api} download={client.download} item={modal.item} onChanged={()=>{setModal(null);library.refresh();location.hash='library'}}/>:modal.kind==='hidden'?<ExcludedItems api={api} download={client.download} onChanged={library.refresh}/>:<><p>本次备注尚未保存。请先保存，或明确放弃修改后离开。</p><div className="action-row"><button className="secondary" onClick={()=>setModal(null)}>继续编辑</button><button className="primary" onClick={()=>{setDrafts(old=>({...old,[selectedRef]:undefined}));setDirty(false);const action=modal.action;setModal(null);action()}}>放弃修改并继续</button></div></>}</Dialog></div>}
+  </>;
+}
+
+function Handoff({api,item,legacyReadonly,onNotice}){
+  const read=useArtifact(api,item?.id,'summary',item?.artifacts?.summary?.version);
+  const text=item&&read.result?.text?copyEvidence(item,'summary',read.result.text,read.result.next_offset!=null):'';
+  return <><div className="section-title"><div className="eyebrow">REUSE YOUR COLLECTION</div><h1>让你的 AI 用上收藏</h1></div>{item&&<section className="handoff"><h2>{item.title}</h2>{read.error&&<p role="alert">{read.error}</p>}{read.busy?<p>正在读取已保存总结…</p>:text?<><textarea readOnly aria-label="给 AI 的资料" value={text}/><button className="primary" onClick={async()=>{try{await navigator.clipboard.writeText(text);onNotice('已复制内容与来源。')}catch{onNotice('请在上方文本框手动复制。')}}}>复制内容与来源</button>{read.result.next_offset!=null&&<button className="secondary" onClick={read.loadMore}>继续加载总结</button>}</>:<p>这条资料尚无总结。可以返回查看原文，或让下方 CLI 按需读取已有内容。</p>}</section>}<Access api={api} legacyReadonly={legacyReadonly}/></>;
+}

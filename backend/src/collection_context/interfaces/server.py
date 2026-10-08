@@ -68,9 +68,9 @@ def main(argv: list[str] | None = None) -> int:
         store = LibraryStore(args.workspace)
         registry = AccessRegistry(store)
         credentials = registry.credentials()
-        if not credentials:
+        if not credentials and args.remote:
             raise ContextError("access_setup_required", "请先使用 access-key 命令创建产品访问口令。")
-        policy = AccessPolicy(args.origin, credentials, remote=args.remote)
+        policy = AccessPolicy(args.origin, credentials, remote=args.remote, local_ui=not args.remote)
         parsed = urlsplit(args.origin)
         if (parsed.scheme == "https") != bool(args.tls_cert):
             raise ContextError("https_required", "外部地址协议与服务器 TLS 配置不一致。")

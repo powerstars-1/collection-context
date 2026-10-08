@@ -20,7 +20,7 @@ from collection_context.workflows.executor import Stage, StageOutcome, plan
 
 VERSION = "summary_refresh_v1"
 SOURCE_KINDS = ("original", "audio", "screen", "image")
-OUTPUT_KINDS = ("summary", "readable")
+OUTPUT_KINDS = ("summary",)
 
 
 def capture(store: LibraryStore, ref: str) -> dict[str, Any]:
@@ -29,7 +29,7 @@ def capture(store: LibraryStore, ref: str) -> dict[str, Any]:
         previous = item["artifacts"].get(kind)
         if previous is not None:
             if previous.get("owner_edit"):
-                raise ContextError("owner_edit_conflict", "总结或可读内容已有人工作修改，未自动替换。")
+                raise ContextError("owner_edit_conflict", "总结已有人工作修改，未自动替换。")
             artifact_bytes(store, item, kind)  # Unaccepted edits must not be overwritten either.
     original = {"title": item["title"], "body": item["body"]}
     sources, gaps = [], []
@@ -222,12 +222,8 @@ def build(
             "complete": snapshot["coverage"]["complete"] and result["status"] == "ready",
             "refresh_context_id": digest(context),
         }
-        readable = "# 原文\n\n" + snapshot["original"]["title"] + "\n\n" + snapshot["original"]["body"]
-        for source in snapshot["sources"]:
-            readable += f"\n\n# {source['kind']} [{source['evidence_id']}]\n\n{source['text']}"
-        readable += "\n\n# 内容总结\n\n" + output["text"]
-        if not output["text"].strip() or len(output["text"]) > 500_000 or len(readable) > 500_000:
-            raise ContextError("summary_output_limit", "总结或可读正文超过资料上限，未截断后声称完整。")
+        if not output["text"].strip() or len(output["text"]) > 500_000:
+            raise ContextError("summary_output_limit", "总结超过资料上限，未截断后声称完整。")
 
         def save(state):
             current = verify(store, context)
@@ -244,7 +240,6 @@ def build(
                 item,
                 {
                     "summary": {"text": output["text"], "processor_version": VERSION, "coverage": coverage},
-                    "readable": {"text": readable, "processor_version": VERSION, "coverage": coverage},
                 },
                 expected_content_hash=snapshot["content_hash"],
             )

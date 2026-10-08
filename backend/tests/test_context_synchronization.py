@@ -19,6 +19,7 @@ from collection_context.workflows.extraction import ExtractionWorkflow
 from collection_context.workflows.ingestion import IngestionWorkflow
 from collection_context.workflows.synchronization import SynchronizationWorkflow
 from collection_context.workflows.worker import BackgroundWorker
+from collection_context.workflows.connection import ConnectionCatalog
 
 ACCOUNT = self_account(account_payload())
 
@@ -125,6 +126,8 @@ def test_tampered_registered_plan_and_nonzero_fee_budget_are_refused(syncenv):
 
 
 def test_platform_failure_is_blocked_not_successful_empty_and_is_not_retried(syncenv):
+    catalog = ConnectionCatalog(syncenv[0])
+    catalog.record(ACCOUNT, expected_version=None)
     job, plan = queued(syncenv)
 
     def rejected(*a, **kw):
@@ -137,6 +140,21 @@ def test_platform_failure_is_blocked_not_successful_empty_and_is_not_retried(syn
     assert syncenv[1].jobs.get(job["id"])["state"] == "blocked"
     assert syncenv[0].snapshot()["scopes"][plan["scope_id"]]["status"] == "blocked"
     assert not syncenv[0].snapshot()["items"] and syncenv[3] == ["opened", "closed"]
+    assert catalog.status()["state"] == "unverified"
+    assert catalog.status()["error_code"] == "source_login_required"
+
+
+def test_temporary_platform_failure_keeps_remembered_account(syncenv):
+    catalog = ConnectionCatalog(syncenv[0])
+    proof = catalog.record(ACCOUNT, expected_version=None)
+    job, _ = queued(syncenv)
+
+    def unavailable(*a, **kw):
+        raise ContextError("source_site_unavailable", "原创暂时不可用")
+
+    syncenv[2].fetch_self = unavailable
+    syncenv[1].run(job["id"])
+    assert catalog.status() == proof
 
 
 def test_source_only_worker_does_not_run_or_admit_model_tasks(syncenv):
@@ -281,12 +299,100 @@ def test_account_change_before_list_refused_without_opening_private_page(monkeyp
     assert caught.value.code == "source_account_changed"
 
 
+@pytest.mark.parametrize("body", ["cursor=0&count=10", '{"cursor":0,"count":10}'])
+def test_saved_list_reads_real_post_body_not_only_url(monkeypatch, body):
+    class SavedPage(AccountPage):
+        url = "https://www.douyin.com/user/self"
+
+        def goto(self, *args, **kwargs):
+            self.callback(SimpleNamespace(
+                url="https://www.douyin.com/aweme/v1/web/aweme/listcollection/?device_platform=webapp",
+                request=SimpleNamespace(method="POST", post_data=body),
+                status=200, headers={},
+                body=lambda: json.dumps({
+                    "status_code": 0, "aweme_list": [raw_item()], "cursor": 10, "has_more": 0,
+                }).encode(),
+            ))
+
+    page = SavedPage([])
+    source = DouyinBrowserSource(SimpleNamespace(context=SimpleNamespace(new_page=lambda: page)))
+    monkeypatch.setattr(source, "account", lambda: ACCOUNT)
+    result = source.fetch_self("saved", expected_account_ref=ACCOUNT.public()["account_ref"], limit=1)
+    assert list(result.items) == ["81"] and page.closed
+
+
+@pytest.mark.parametrize("query,body,code", [
+    ("cursor=0", "cursor=10", "source_cursor_invalid"),
+    ("", "cursor=0&cursor=10", "source_cursor_invalid"),
+    ("", "cursor=0&collects_id=9", "source_scope_mismatch"),
+    ("", "cursor=0&user_id=other", "source_scope_mismatch"),
+])
+def test_post_paging_and_identity_conflicts_are_not_hidden(monkeypatch, query, body, code):
+    class SavedPage(AccountPage):
+        url = "https://www.douyin.com/user/self"
+
+        def goto(self, *args, **kwargs):
+            self.callback(SimpleNamespace(
+                url="https://www.douyin.com/aweme/v1/web/aweme/listcollection/?" + query,
+                request=SimpleNamespace(method="POST", post_data=body),
+                status=200, headers={}, body=lambda: b"{}",
+            ))
+
+    page = SavedPage([])
+    source = DouyinBrowserSource(SimpleNamespace(context=SimpleNamespace(new_page=lambda: page)))
+    monkeypatch.setattr(source, "account", lambda: ACCOUNT)
+    with pytest.raises(ContextError) as caught:
+        source.fetch_self("saved", expected_account_ref=ACCOUNT.public()["account_ref"])
+    assert caught.value.code == code and page.closed
+
+
+def test_collection_opens_folder_subtab_then_observed_tile(monkeypatch):
+    entered = []
+
+    class FolderPage(AccountPage):
+        url = "https://www.douyin.com/user/self"
+
+        def emit(self, path, payload):
+            self.callback(SimpleNamespace(
+                url="https://www.douyin.com" + path,
+                status=200, headers={}, body=lambda: json.dumps(payload).encode(),
+            ))
+
+        def goto(self, url, **kwargs):
+            assert "showSubTab=favorite_folder" in url and "collects_id=" not in url
+            self.emit("/aweme/v1/web/collects/video/list/?collects_id=8&cursor=0", {
+                "status_code": 0, "aweme_list": [raw_item(aweme_id="83")], "has_more": 0, "cursor": 10,
+            })
+            self.emit("/aweme/v1/web/aweme/listcollection/?cursor=0", {
+                "status_code": 0, "aweme_list": [raw_item(aweme_id="82")], "has_more": 0, "cursor": 10,
+            })
+            self.emit("/aweme/v1/web/collects/list/?cursor=0", {
+                "status_code": 0, "collects_list": [{"collects_id_str": "9", "collects_name": "教程"}],
+                "has_more": 0, "cursor": 0,
+            })
+
+        def get_by_text(self, name, exact):
+            assert name == "教程" and exact
+            def click(**kwargs):
+                entered.append(name)
+                self.emit("/aweme/v1/web/collects/video/list/?collects_id=9&cursor=0", {
+                    "status_code": 0, "aweme_list": [raw_item()], "has_more": 0, "cursor": 10,
+                })
+            return SimpleNamespace(count=lambda: 1, is_visible=lambda: True, click=click)
+
+    page = FolderPage([])
+    source = DouyinBrowserSource(SimpleNamespace(context=SimpleNamespace(new_page=lambda: page)))
+    monkeypatch.setattr(source, "account", lambda: ACCOUNT)
+    result = source.fetch_self("collection", collection_id="9", expected_account_ref=ACCOUNT.public()["account_ref"], limit=1)
+    assert entered == ["教程"] and list(result.items) == ["81"] and page.closed
+
+
 @pytest.mark.parametrize(
     "kind,path,error",
     [
         ("liked", "/aweme/v1/web/aweme/favorite/?sec_user_id=other&max_cursor=0", "source_scope_mismatch"),
         ("saved", "/aweme/v1/web/aweme/listcollection/?collects_id=9&cursor=0", "source_scope_mismatch"),
-        ("collection", "/aweme/v1/web/collects/video/list/?collects_id=8&cursor=0", "source_scope_mismatch"),
+        ("collection", "/aweme/v1/web/collects/video/list/?collects_id=&cursor=0", "source_scope_mismatch"),
         (
             "collection",
             "/aweme/v1/web/collects/video/list/?collects_id=9&collects_id=8&cursor=0",

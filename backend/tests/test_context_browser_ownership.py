@@ -35,6 +35,30 @@ def code(action):
     return caught.value.code
 
 
+@pytest.mark.parametrize("failure", [False, True])
+def test_clear_login_only_clears_cookies_and_douyin_storage(tmp_path, monkeypatch, failure):
+    events = []
+    page = SimpleNamespace(close=lambda: events.append("page-closed"))
+
+    def send(command, params):
+        events.append((command, params))
+        if failure:
+            raise RuntimeError("original fixture storage failure")
+
+    session = SimpleNamespace(send=send, detach=lambda: events.append("detached"))
+    browser = BrowserSession(tmp_path / "own-profile")
+    browser._context = SimpleNamespace(clear_cookies=lambda: events.append("cookies-cleared"),
+                                       new_page=lambda: page, new_cdp_session=lambda _page: session)
+    monkeypatch.setattr(browser, "check", lambda: None)
+    if failure:
+        assert code(browser.clear_login) == "source_logout_failed"
+    else:
+        browser.clear_login()
+    assert events == ["cookies-cleared", ("Storage.clearDataForOrigin", {
+        "origin": "https://www.douyin.com", "storageTypes": "all"}), "detached", "page-closed"]
+    assert not browser.profile_dir.exists()
+
+
 @pytest.fixture
 def profile(tmp_path):
     root = tmp_path / "原创 中文 空格账号"

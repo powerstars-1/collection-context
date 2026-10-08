@@ -11,7 +11,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SOURCE_KINDS = frozenset({"liked", "saved", "collection", "creator", "link"})
-ARTIFACT_KINDS = frozenset({"original", "audio", "screen", "summary", "readable", "image", "user_note"})
+ARTIFACT_KINDS = frozenset({"original", "audio", "screen", "summary", "image", "user_note"})
 JOB_STATES = frozenset({"queued", "running", "succeeded", "partial", "failed", "cancelled", "blocked"})
 TERMINAL_STATES = frozenset({"succeeded", "partial", "failed", "cancelled"})
 _ID = re.compile(r"^[a-z][a-z0-9_]{1,79}$")

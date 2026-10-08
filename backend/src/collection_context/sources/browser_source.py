@@ -6,6 +6,7 @@ import json
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -23,6 +24,25 @@ if TYPE_CHECKING:
 class DouyinBrowserSource:
     def __init__(self, browser: BrowserSession):
         self.browser = browser
+        self._connection_page: Any | None = None
+        self._connection_account: Account | None = None
+
+    @contextmanager
+    def connection_observation(self):
+        """Keep one owned page across login, folder discovery and the final identity check."""
+        if self._connection_page is not None:
+            raise ContextError("connection_busy", "当前连接观察尚未结束。")
+        if self.browser.context is None:
+            raise ContextError("browser_not_running", "请先启动自己的独立登录浏览器。")
+        page = self.browser.context.new_page()
+        self._connection_page = page
+        try:
+            yield
+        finally:
+            self._connection_page = None
+            self._connection_account = None
+            if not page.is_closed():
+                page.close()
 
     @staticmethod
     def _json(response) -> dict[str, Any]:
@@ -47,9 +67,112 @@ class DouyinBrowserSource:
         return data
 
     @staticmethod
+    def _request_params(response) -> dict[str, list[str]]:
+        """Read normal-page paging from either URL or POST form/JSON body.
+
+        In particular, listcollection uses a POST form, unlike the liked list.
+        Keep duplicate/conflicting fields visible to the caller's scope checks.
+        """
+        params = parse_qs(urlsplit(response.url).query, keep_blank_values=True)
+        request = getattr(response, "request", None)
+        if request is None or getattr(request, "method", "GET") != "POST":
+            return params
+        raw = getattr(request, "post_data", None)
+        if isinstance(raw, str):
+            if len(raw) > 64_000:
+                raise ContextError("source_limit", "列表请求体超过上限。")
+            if not raw:
+                return params
+            if raw.lstrip().startswith("{"):
+                try:
+                    body = json.loads(raw)
+                except ValueError:
+                    raise ContextError("source_shape_changed", "列表请求体未能解析。") from None
+            else:
+                body = parse_qs(raw, keep_blank_values=True)
+        else:
+            try:
+                body = getattr(request, "post_data_json", None)
+            except Exception:
+                raise ContextError("source_shape_changed", "列表请求体未能解析。") from None
+        if body is None:
+            return params
+        if not isinstance(body, dict):
+            raise ContextError("source_shape_changed", "列表请求体不是明确字段。")
+        for key in ("cursor", "max_cursor", "count", "collects_id", "sec_user_id", "user_id"):
+            if key not in body:
+                continue
+            values = body[key] if isinstance(body[key], list) else [body[key]]
+            if any(type(value) not in {str, int} for value in values):
+                raise ContextError("source_shape_changed", "列表请求字段无法识别。")
+            values = [str(value) for value in values]
+            if key not in params:
+                params[key] = values
+            elif len(params[key]) != 1 or values != params[key]:
+                params[key] += values
+        return params
+
+    @staticmethod
     def _cancel(cancelled: Callable[[], bool] | None) -> None:
         if cancelled is not None and cancelled():
             raise ContextError("connection_cancelled", "已取消本次连接观察，未启动同步或模型。")
+
+    def resolve_creator(self, value: str, *, cancelled: Callable[[], bool] | None = None) -> dict:
+        """Resolve a user-supplied profile share in one owned page, without syncing works."""
+        link = parse_link(value)
+        if link.kind not in {"short", "creator"}:
+            raise ContextError("invalid_creator_url", "请粘贴博主主页的分享链接，而非单个作品链接。")
+        if self.browser.context is None:
+            raise ContextError("browser_not_running", "请先启动独立浏览器。")
+        page = self.browser.context.new_page()
+        names: dict[str, str] = {}
+        blocked: list[bool] = []
+
+        def route_request(route):
+            request = route.request
+            if request.is_navigation_request() and request.frame == page.main_frame:
+                try:
+                    if parse_link(request.url).kind not in {"short", "creator"}:
+                        raise ValueError
+                except (ContextError, ValueError):
+                    blocked.append(True)
+                    route.abort()
+                    return
+            route.abort() if request.resource_type == "media" else route.fallback()
+
+        def observed(response):
+            parts = urlsplit(response.url)
+            if parts.hostname != "www.douyin.com" or parts.path != "/aweme/v1/web/user/profile/other/":
+                return
+            try:
+                user = self._json(response).get("user", {})
+                identity, name = user.get("sec_uid"), user.get("nickname")
+                if isinstance(identity, str) and isinstance(name, str) and 1 <= len(name) <= 200 and "\x00" not in name:
+                    names[identity] = name
+            except (ContextError, AttributeError):
+                pass
+
+        page.on("response", observed)
+        page.route("**/*", route_request)
+        try:
+            self._cancel(cancelled)
+            page.goto(link.url, wait_until="domcontentloaded", timeout=30_000)
+            deadline = time.monotonic() + 5
+            resolved = parse_link(page.url)
+            if blocked or resolved.kind != "creator" or link.kind == "creator" and resolved.identity != link.identity:
+                raise ContextError("invalid_creator_url", "此链接未打开明确的博主主页，请复制主页分享链接。")
+            while resolved.identity not in names and time.monotonic() < deadline:
+                self._cancel(cancelled)
+                page.wait_for_timeout(200)
+            self._cancel(cancelled)
+            return {"creator_url": resolved.url, "display_name": names.get(resolved.identity), "model_requests": 0}
+        except ContextError:
+            raise
+        except Exception:
+            raise ContextError("creator_resolution_failed", "博主链接解析失败，请检查链接或独立浏览器登录。") from None
+        finally:
+            if not page.is_closed():
+                page.close()
 
     def account(
         self, *, interactive: bool = False, timeout: float = 15, cancelled: Callable[[], bool] | None = None
@@ -61,7 +184,8 @@ class DouyinBrowserSource:
         if interactive and self.browser.headless:
             raise ContextError("desktop_login_required", "此登录入口需要可见浏览器；无桌面登录路径仍需验证。")
         self._cancel(cancelled)
-        page = self.browser.context.new_page()
+        shared_page = self._connection_page is not None
+        page = self._connection_page if self._connection_page is not None else self.browser.context.new_page()
         accounts: list[Account] = []
         failures: list[ContextError] = []
 
@@ -77,10 +201,11 @@ class DouyinBrowserSource:
                 failures.append(ContextError("source_shape_changed", "本人账号响应未能解析。"))
 
         page.on("response", observed)
-        page.route(
-            "**/*",
-            lambda route: route.abort() if route.request.resource_type == "media" else route.fallback(),
-        )
+
+        def skip_media(route):
+            route.abort() if route.request.resource_type == "media" else route.fallback()
+
+        page.route("**/*", skip_media)
         deadline = time.monotonic() + timeout
         opened = False
         try:
@@ -92,6 +217,8 @@ class DouyinBrowserSource:
             while time.monotonic() < deadline:
                 self._cancel(cancelled)
                 if accounts:
+                    if shared_page:
+                        self._connection_account = accounts[-1]
                     return accounts[-1]
                 if interactive and not opened:
                     buttons = page.get_by_role("button", name="登录", exact=True)
@@ -107,8 +234,10 @@ class DouyinBrowserSource:
                             # the header button. Leave the normal window available for the user;
                             # do not close it or click other controls to bypass an overlay.
                         opened = True
-                if not interactive and failures:
-                    raise failures[-1]
+                # A page transition can cancel an older self-profile response
+                # while the fresh response is still arriving. Keep observing the
+                # current navigation until a valid result or the bounded deadline;
+                # do not fail login on the first unreadable in-flight response.
                 page.wait_for_timeout(200)
             if failures:
                 raise failures[-1]
@@ -129,7 +258,11 @@ class DouyinBrowserSource:
             ) from None
         finally:
             if not page.is_closed():
-                page.close()
+                if shared_page:
+                    page.remove_listener("response", observed)
+                    page.unroute("**/*", skip_media)
+                else:
+                    page.close()
 
     def fetch_collections(
         self,
@@ -144,11 +277,17 @@ class DouyinBrowserSource:
         if type(timeout) not in {int, float} or not 1 <= timeout <= 120:
             raise ContextError("invalid_source_timeout", "收藏夹等待时间无效。")
         self._cancel(cancelled)
-        account = self.account(cancelled=cancelled) if cancelled is not None else self.account()
+        # Only reuse the self response obtained immediately in this owned observation.
+        # The account check after discovery remains a fresh platform observation.
+        account = self._connection_account
+        if account is None:
+            account = self.account(cancelled=cancelled) if cancelled is not None else self.account()
+        self._connection_account = None
         if account.public()["account_ref"] != expected_account_ref:
             raise ContextError("source_account_changed", "账号与待发现范围不同，未读取收藏夹。")
         assert self.browser.context is not None
-        page = self.browser.context.new_page()
+        shared_page = self._connection_page is not None
+        page = self._connection_page if self._connection_page is not None else self.browser.context.new_page()
         failures: list[ContextError] = []
         seen: set[str] = set()
 
@@ -185,13 +324,20 @@ class DouyinBrowserSource:
                 failures.append(ContextError("source_shape_changed", "收藏夹响应未能解析，未保存空成功。"))
 
         page.on("response", observed)
-        page.route("**/*", lambda r: r.abort() if r.request.resource_type == "media" else r.fallback())
+
+        def skip_media(route):
+            route.abort() if route.request.resource_type == "media" else route.fallback()
+
+        page.route("**/*", skip_media)
         deadline = time.monotonic() + timeout
         last_pages, scrolls = 0, 0
         try:
             page.goto(
-                "https://www.douyin.com/user/self?showTab=favorite_collection",
-                wait_until="domcontentloaded",
+                # The parent 收藏 tab defaults to 视频. The real 收藏夹 sub-tab
+                # has its own URL; waiting for all page scripts also times out on
+                # an otherwise already usable, logged-in Douyin page.
+                "https://www.douyin.com/user/self?showSubTab=favorite_folder&showTab=favorite_collection",
+                wait_until="commit",
                 timeout=min(30_000, timeout * 1000),
             )
             resolved = urlsplit(page.url)
@@ -225,7 +371,12 @@ class DouyinBrowserSource:
                 "source_site_unavailable", "收藏夹页面未完成，未绕过平台验证。", retryable=True
             ) from None
         finally:
-            page.close()
+            if not page.is_closed():
+                if shared_page:
+                    page.remove_listener("response", observed)
+                    page.unroute("**/*", skip_media)
+                else:
+                    page.close()
         self._cancel(cancelled)
         current = self.account(cancelled=cancelled) if cancelled is not None else self.account()
         if current.public()["account_ref"] != expected_account_ref:
@@ -417,7 +568,7 @@ class DouyinBrowserSource:
     ) -> CreatorBatch:
         """Observe normal self-page requests, bound to a positively verified account.
 
-        Endpoint/query contracts are compatibility candidates, not real-login proof.
+        Observe the real page's request method, paging and selected folder.
         No signed requests, cookie import, hidden account switching or caller-provided API URL.
         """
         if kind not in {"liked", "saved", "collection"}:
@@ -442,22 +593,61 @@ class DouyinBrowserSource:
             "like" if kind == "liked" else "favorite_collection"
         )
         if collection_id:
-            url += "&collects_id=" + collection_id
+            # collects_id on the parent tab does not enter a folder. Open the
+            # actual folder sub-tab, then select its observed platform name.
+            url += "&showSubTab=favorite_folder"
         assert self.browser.context is not None
         page = self.browser.context.new_page()
         failures: list[ContextError] = []
         seen: set[str] = set()
+        folders = FolderBatch() if collection_id else None
+        folder_entered = False
 
         def observed(response):
             parts = urlsplit(response.url)
+            if (
+                folders is not None and not folders.done and not failures
+                and parts.hostname == "www.douyin.com"
+                and parts.path == "/aweme/v1/web/collects/list/"
+            ):
+                try:
+                    params = self._request_params(response)
+                    if (
+                        "sec_user_id" in params and params["sec_user_id"] != [account.sec_uid]
+                        or "user_id" in params and params["user_id"] != [account.uid]
+                    ):
+                        raise ContextError("source_scope_mismatch", "收藏夹列表不是已确认账号。")
+                    cursors = params.get("cursor", [])
+                    if len(cursors) != 1 or not re.fullmatch(r"[0-9]{1,32}", cursors[0]):
+                        raise ContextError("source_cursor_invalid", "收藏夹请求缺少明确游标。")
+                    folders.accept(folder_page(self._json(response)), cursors[0])
+                except ContextError as error:
+                    failures.append(error)
+                return
             if parts.hostname != "www.douyin.com" or parts.path != endpoint or batch.done or failures:
                 return
-            params = parse_qs(parts.query, keep_blank_values=True)
+            try:
+                params = self._request_params(response)
+            except ContextError as error:
+                failures.append(error)
+                return
+            # The folder overview preloads several folders' video previews.
+            # They are legitimate page traffic but not members of our scope.
+            # Ignore a clearly identified other folder; never merge it.
+            folder_ids = params.get("collects_id", [])
+            if (
+                kind == "collection" and len(folder_ids) == 1
+                and re.fullmatch(r"[0-9]{1,32}", folder_ids[0])
+                and folder_ids[0] != collection_id
+            ):
+                return
             if (
                 kind == "liked"
                 and params.get("sec_user_id") != [account.sec_uid]
                 or "sec_user_id" in params
                 and params["sec_user_id"] != [account.sec_uid]
+                or "user_id" in params
+                and params["user_id"] != [account.uid]
                 or kind == "collection"
                 and params.get("collects_id") != [collection_id]
                 or kind == "saved"
@@ -489,7 +679,7 @@ class DouyinBrowserSource:
         deadline = time.monotonic() + timeout
         last_pages, scrolls = 0, 0
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=min(30_000, timeout * 1000))
+            page.goto(url, wait_until="commit", timeout=min(30_000, timeout * 1000))
             resolved = urlsplit(page.url)
             if (
                 resolved.scheme != "https"
@@ -502,6 +692,19 @@ class DouyinBrowserSource:
                     raise failures[0]
                 if batch.done:
                     break
+                if folders is not None and not folder_entered and folders.pages:
+                    folder = folders.folders.get(collection_id)
+                    if folder is not None:
+                        matches = [row for row in folders.folders.values() if row["name"] == folder["name"]]
+                        if len(matches) != 1:
+                            raise ContextError("source_scope_mismatch", "收藏夹名称重复，不能猜测进入哪个夹。")
+                        tile = page.get_by_text(folder["name"], exact=True)
+                        if tile.count() == 1 and tile.is_visible():
+                            tile.click(timeout=2_000)
+                            folder_entered = True
+                            continue
+                    elif folders.done:
+                        raise ContextError("source_collection_unavailable", "所选收藏夹已不存在，请刷新收藏夹。")
                 if batch.pages > last_pages and scrolls < 5:
                     last_pages = batch.pages
                     page.mouse.move(800, 700)

@@ -88,6 +88,7 @@ class AccessPolicy:
         credentials: list[Credential],
         *,
         remote: bool = False,
+        local_ui: bool = False,
         requests_per_minute: int = 120,
         session_seconds: int = 3600,
     ):
@@ -111,8 +112,10 @@ class AccessPolicy:
             valid_origin = False
         if not valid_origin:
             raise ContextError("invalid_access_config", "本机需明确回环地址和端口；远程需显式开启 HTTPS。")
+        if type(local_ui) is not bool or local_ui and (remote or parsed.hostname not in {"localhost", "127.0.0.1", "::1"}):
+            raise ContextError("invalid_access_config", "免口令管理页仅用于本机回环地址。")
         if (
-            not credentials
+            (not credentials and not local_ui)
             or len(credentials) > 64
             or len({c.principal for c in credentials}) != len(credentials)
         ):
@@ -124,6 +127,10 @@ class AccessPolicy:
         if type(session_seconds) is not int or not 60 <= session_seconds <= 86400:
             raise ContextError("invalid_access_config", "页面会话期限无效。")
         self.origin, self.authority, self.remote = origin, parsed.netloc, remote
+        self.local_ui = local_ui
+        # Local page access is not a persistent Key and cannot authenticate a Bearer request.
+        self.local_owner = Credential("local_ui_owner", "0" * 64,
+            frozenset({"collections:read", "ui:view", "ui:manage"})) if local_ui else None
         self.credentials = {c.principal: c for c in credentials}
         self.limit, self.session_seconds = requests_per_minute, session_seconds
         self.sessions: dict[str, Session] = {}
@@ -166,7 +173,8 @@ class AccessPolicy:
         self.sessions = {
             key: value
             for key, value in self.sessions.items()
-            if value.expires_at > now and value.principal in self.credentials
+            if value.expires_at > now and (value.principal in self.credentials
+                or self.local_owner is not None and value.principal == self.local_owner.principal)
         }
 
     def session(self, token: str | None) -> tuple[Credential, Session]:
@@ -174,7 +182,8 @@ class AccessPolicy:
         value = self.sessions.get(token or "")
         if value is None:
             raise ContextError("authentication_required", "页面会话无效或已过期，请重新登录。")
-        return self.credentials[value.principal], value
+        credential = self.local_owner if self.local_owner is not None and value.principal == self.local_owner.principal else self.credentials[value.principal]
+        return credential, value
 
     def revoke(self, principal: str) -> None:
         self.credentials.pop(principal, None)
@@ -186,4 +195,5 @@ class AccessPolicy:
             "permissions": sorted(credential.permissions),
             "csrf_token": session.csrf if session else None,
             "session_seconds": self.session_seconds,
+            "local_ui": self.local_owner is not None and credential is self.local_owner,
         }

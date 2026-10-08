@@ -439,7 +439,6 @@ class LibraryStore:
             "audio": "音频转写",
             "screen": "画面文字",
             "summary": "内容总结",
-            "readable": "可读内容",
             "image": "图片提取",
             "user_note": "用户备注",
         }

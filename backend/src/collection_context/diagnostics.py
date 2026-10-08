@@ -243,6 +243,10 @@ def port_report(port: int, host: str = "127.0.0.1") -> dict[str, Any]:
     family = socket.AF_INET6 if host == "::1" else socket.AF_INET
     try:
         with socket.socket(family, socket.SOCK_STREAM) as probe:
+            if os.name != "nt":
+                # Match the HTTP listener on Unix: TIME_WAIT after a restart
+                # is reusable and does not mean another server owns the port.
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind((host, port))
     except OSError:
         return {"host": host, "port": port, "available": False, "code": "port_in_use"}

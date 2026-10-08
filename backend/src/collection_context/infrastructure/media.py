@@ -20,6 +20,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from collection_context.application.contracts import ContextError, digest
+from collection_context.infrastructure.download_limits import MAX_SOURCE_BYTES
 
 THUMB_WIDTH, THUMB_HEIGHT = 160, 90
 THUMB_BYTES = THUMB_WIDTH * THUMB_HEIGHT
@@ -121,7 +122,8 @@ def validate_raster(
 
 @dataclass(frozen=True)
 class MediaPolicy:
-    max_source_bytes: int = 128_000_000
+    adaptive_selection: bool = False
+    max_source_bytes: int = MAX_SOURCE_BYTES
     max_duration_seconds: float = 7200
     max_pixels: int = 8_294_400
     sample_fps: int = 2
@@ -139,8 +141,10 @@ class MediaPolicy:
     command_timeout_seconds: float = 120
 
     def __post_init__(self) -> None:
+        if type(self.adaptive_selection) is not bool:
+            raise ContextError("invalid_media_policy", "自适应选帧开关无效。")
         integer_bounds = {
-            "max_source_bytes": (1, 512_000_000),
+            "max_source_bytes": (1, MAX_SOURCE_BYTES),
             "max_pixels": (1, 33_177_600),
             "sample_fps": (1, 10),
             "max_sampled_frames": (1, 144_002),
@@ -297,6 +301,8 @@ class FrameScanner:
         self.selected: list[FrameCandidate] = []
         self.reference: bytes | None = None
         self.last: bytes | None = None
+        self.candidate_count = 0
+        self.compactions = 0
 
     @staticmethod
     def changes(first: bytes, second: bytes) -> tuple[float, float, int]:
@@ -318,8 +324,22 @@ class FrameScanner:
         return total / (THUMB_BYTES * 255), max(s / (n * 255) for s, n in zip(sums, counts)), maximum
 
     def _select(self, index: int, reasons: tuple[str, ...], score: float, frame: bytes) -> None:
+        self.candidate_count += 1
         if len(self.selected) >= self.policy.max_selected_frames:
-            raise ContextError("frame_limit", "画面候选超过上限；请分段或显式调整策略，未删帧后标为完整。")
+            if not self.policy.adaptive_selection:
+                raise ContextError("frame_limit", "画面候选超过上限；请分段或显式调整策略，未删帧后标为完整。")
+            # Compact adjacent time ranges, not just the video's head. Keep a
+            # representative in each range and reserve room for later content.
+            if len(self.selected) > 2:
+                middle = self.selected[1:-1]
+                self.selected = [self.selected[0], *[
+                    max(middle[i:i + 2], key=lambda c: c.change_score)
+                    for i in range(0, len(middle), 2)
+                ], self.selected[-1]]
+            else:
+                self.selected = self.selected[:1] if self.policy.max_selected_frames > 1 else []
+            self.selected = self.selected[:max(0, self.policy.max_selected_frames - 1)]
+            self.compactions += 1
         self.selected.append(
             FrameCandidate("f_" + str(index).zfill(6), index, index / self.policy.sample_fps, reasons, score)
         )
@@ -343,12 +363,25 @@ class FrameScanner:
                     reasons.append("visual_change")
                 if local >= 0.055:
                     reasons.append("local_change")
-                if maximum >= self.policy.fine_change_threshold:
+                fine_changed = maximum >= self.policy.fine_change_threshold
+                if self.policy.adaptive_selection:
+                    # Compression noise or a lone changed pixel is not a new page.
+                    fine_changed = maximum >= 32 and sum(
+                        abs(a - b) >= 16 for a, b in zip(self.reference, frame)
+                    ) / THUMB_BYTES >= 0.004
+                if fine_changed:
                     reasons.append("fine_detail_change")
                 if (
                     index - self.selected[-1].sample_index
                 ) / self.policy.sample_fps >= self.policy.anchor_seconds:
                     reasons.append("coverage_anchor")
+                if self.policy.adaptive_selection and reasons:
+                    elapsed = (index - self.selected[-1].sample_index) / self.policy.sample_fps
+                    # Full-frame motion is sampled at 1 Hz; local changes can
+                    # retain short-lived UI pages at up to 5 Hz.
+                    local_page = local >= 0.10 and average < 0.04
+                    if elapsed < (0.2 if local_page else 1.0):
+                        reasons = []
                 if reasons:
                     self._select(index, tuple(reasons), max(average, local, maximum / 255), frame)
             self.last = frame
@@ -486,11 +519,14 @@ class LocalMedia:
         reader = threading.Thread(target=read_output, daemon=True)
         reader.start()
         deadline = time.monotonic() + self.policy.command_timeout_seconds
+        # Local consumers (notably OCR) backpressure the decoder intentionally.
+        # Do not count that work as a hung decoder. Still bound the complete pass.
+        total_deadline = time.monotonic() + max(self.policy.command_timeout_seconds, 600 if consumer else 0)
         output = bytearray()
         total = 0
         try:
             while True:
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= min(deadline, total_deadline):
                     raise ContextError("media_timeout", "本地解码超时；没有发出云请求。", retryable=True)
                 try:
                     chunk = chunks.get(timeout=0.1)
@@ -504,11 +540,13 @@ class LocalMedia:
                 if total > max_bytes:
                     raise ContextError("media_output_limit", "本地解码输出超过上限，未作为完整结果保存。")
                 if consumer is not None:
+                    consumption_started = time.monotonic()
                     consumer(chunk)
+                    deadline = min(total_deadline, deadline + time.monotonic() - consumption_started)
                 else:
                     output.extend(chunk)
             try:
-                code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                code = process.wait(timeout=max(0.01, min(deadline, total_deadline) - time.monotonic()))
             except subprocess.TimeoutExpired:
                 raise ContextError("media_timeout", "解码进程未及时结束。", retryable=True) from None
             if code:
@@ -682,6 +720,9 @@ class LocalMedia:
         return candidates, {
             "sampled_frames": scanner.sample_count,
             "selected_frames": len(candidates),
+            "candidate_events": scanner.candidate_count,
+            "candidate_compactions": scanner.compactions,
+            "selection_policy": "adaptive_timeline_v1" if self.policy.adaptive_selection else "strict_changes",
             "sample_fps": self.policy.sample_fps,
             "sample_interval_seconds": 1 / self.policy.sample_fps,
             "sample_rounding": "up",
@@ -694,7 +735,7 @@ class LocalMedia:
             "complete": False,
             "gaps": [
                 "Sub-sample flashes and details lost when downscaling can be missed.",
-                "OCR-based deduplication is not yet applied; noisy/moving videos may exceed the frame cap.",
+                "Candidate budget reduction is recorded explicitly; selected frames are not exhaustive coverage.",
             ],
             "strategy_hash": self.strategy_hash,
         }
@@ -724,7 +765,12 @@ class LocalMedia:
         ):
             raise ContextError("invalid_frame_reference", "候选帧必须按顺序排列且不能重复。")
         edge = self.policy.max_frame_edge
-        select = "+".join(f"eq(n,{candidate.sample_index})" for candidate in candidates)
+        # FFmpeg's expression parser has a recursion ceiling. A linear sum of
+        # hundreds of candidates fails before yielding any frame; balance it.
+        terms = [f"eq(n,{candidate.sample_index})" for candidate in candidates]
+        while len(terms) > 1:
+            terms = ["(" + "+".join(terms[i:i + 2]) + ")" for i in range(0, len(terms), 2)]
+        select = terms[0]
         parser = PngFrames(
             candidates, self.policy.max_frame_bytes, consumer, max_pixels=self.policy.max_pixels
         )

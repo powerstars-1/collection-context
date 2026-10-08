@@ -13,7 +13,8 @@ from collection_context.application.contracts import ContextError, utc_now
 from collection_context.infrastructure.browser import BrowserSession
 from collection_context.library.store import LibraryStore
 from collection_context.sources.browser_source import DouyinBrowserSource
-from collection_context.workflows.connection import ConnectionWorkflow
+from collection_context.sources.links import parse_link
+from collection_context.workflows.connection import ConnectionCatalog, ConnectionWorkflow
 
 
 def separate_browser(workspace: Path, profile: Path) -> None:
@@ -45,6 +46,7 @@ class ConnectionRunner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._creator_url: str | None = None
         self._status: dict[str, Any] = {
             "run_id": None,
             "mode": None,
@@ -53,6 +55,7 @@ class ConnectionRunner:
             "finished_at": None,
             "error_code": None,
             "browser_ready_at": None,
+            "resolved_creator": None,
         }
 
     def _observe(self, mode: str, stop: threading.Event) -> None:
@@ -65,14 +68,35 @@ class ConnectionRunner:
                 if self.runtime_dir is not None
                 else {}
             )
+            if mode == "logout":
+                # Share the existing execution guard: never clear a login while
+                # another source task is using it. No profile directory deletion.
+                with store.storage.executor(store.files.root, expected_identity=store.files.identity):
+                    if any(job["kind"] in {"sync", "add"} and job["state"] in {"queued", "running"}
+                           for job in store.snapshot()["jobs"].values()):
+                        raise ContextError("source_sync_busy", "同步正在进行，请完成或取消后再退出登录。")
+                    catalog = ConnectionCatalog(store)
+                    before = catalog.status()["version"]
+                    with BrowserSession(self.profile, headless=True, **options) as browser:
+                        browser.clear_login()
+                    catalog.record(None, expected_version=before, error_code="source_logged_out")
+                return
             with BrowserSession(self.profile, headless=self.headless, **options) as browser:
                 with self._lock:
                     if not stop.is_set():
                         self._status.update(state="running", browser_ready_at=utc_now())
-                ConnectionWorkflow(store, DouyinBrowserSource(browser)).observe(
+                source = DouyinBrowserSource(browser)
+                if mode == "creator":
+                    value = source.resolve_creator(self._creator_url, cancelled=stop.is_set)
+                    if value["display_name"]:
+                        store.transact(lambda state: state["settings"].setdefault("creator_names", {}).update({value["creator_url"]: value["display_name"]}))
+                    with self._lock:
+                        self._status["resolved_creator"] = value
+                    return
+                ConnectionWorkflow(store, source).observe(
                     interactive=mode == "login",
                     timeout=300 if mode == "login" else 15,
-                    discover=mode == "folders",
+                    discover=mode in {"folders", "login"},
                     cancelled=stop.is_set,
                 )
         finally:
@@ -96,11 +120,18 @@ class ConnectionRunner:
         with self._lock:
             return self._public()
 
-    def start(self, *, mode: str, source_confirmed: bool) -> dict:
+    def start(self, *, mode: str, source_confirmed: bool, creator_url: str | None = None) -> dict:
         if source_confirmed is not True:
             raise ContextError("source_confirmation_required", "请确认允许本次独立浏览器访问本人账号页面。")
-        if not isinstance(mode, str) or mode not in {"login", "check", "folders"}:
-            raise ContextError("invalid_argument", "连接方式只支持登录、验证或发现收藏夹。")
+        if not isinstance(mode, str) or mode not in {"login", "check", "folders", "creator", "logout"}:
+            raise ContextError("invalid_argument", "连接操作无效。")
+        if mode == "creator":
+            parsed = parse_link(creator_url)
+            if parsed.kind not in {"short", "creator"}:
+                raise ContextError("invalid_creator_url", "请粘贴博主主页分享链接。")
+            creator_url = parsed.url
+        elif creator_url is not None:
+            raise ContextError("invalid_argument", "此操作不接受博主链接。")
         if mode == "login" and self.headless:
             raise ContextError(
                 "desktop_login_required", "后台无可见桌面，只能验证已有独立登录；远程登录仍需另验。"
@@ -111,6 +142,7 @@ class ConnectionRunner:
             if self._thread and self._thread.is_alive():
                 raise ContextError("connection_busy", "已有连接观察进行中，请查看或取消，不重复弹窗口。")
             self._stop = threading.Event()
+            self._creator_url = creator_url
             self._status = {
                 "run_id": "c_" + secrets.token_hex(16),
                 "mode": mode,
@@ -119,6 +151,7 @@ class ConnectionRunner:
                 "finished_at": None,
                 "error_code": None,
                 "browser_ready_at": None,
+                "resolved_creator": None,
             }
             self._thread = threading.Thread(target=self._run, args=(mode, self._stop), daemon=True)
             try:

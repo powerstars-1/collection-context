@@ -1,0 +1,18 @@
+/* Environmental layer only; no changes to panel geometry or navigation choreography. */
+.shell{isolation:isolate;background:#030507}
+.collection-shell{background:#030507}
+.cosmic-backdrop{position:absolute;inset:0;width:100%;height:100%;z-index:0;pointer-events:none;opacity:1;transition:opacity 420ms ease}
+.cosmic-backdrop[data-tone=utility]{opacity:.74}
+.cosmic-backdrop[data-tone=library]{opacity:.62}
+.cosmic-backdrop[data-tone=reading]{opacity:.38}
+.shell>.main{position:relative;z-index:auto}
+.shell>.top{background:linear-gradient(#080b12e6,#080b1266);border-bottom-color:#bacfeb18}
+.shell>.capture,.shell>.inline-error,.shell>.link-progress{position:relative;z-index:2}
+.page-scroll.live-controls{background:linear-gradient(90deg,#03050820,#03050800 40%,#03050820)}
+.scene-category{background:linear-gradient(125deg,#a9c4eb16,#0b101cc4);backdrop-filter:blur(5px);box-shadow:inset 0 1px 0 #eff6ff12,0 12px 35px #0006}
+.scene-category.active{box-shadow:inset 0 1px 0 #d7eaff20,0 0 25px #7a9fdd0d}
+.live-controls .cc-sources-page .cc-source-list{background:#080e18bf;box-shadow:inset 0 1px 0 #e4eeff08,0 12px 45px #0003}
+.live-controls .cc-sync-account,.live-controls .cc-model-service,.live-controls .cc-provider-card{background:linear-gradient(125deg,#24324985,#0a101bd9)!important;box-shadow:inset 0 1px 0 #e4eeff08}
+.reader-pane.reading-surface,.neural-library .workspace-panel>.reader-pane{background:linear-gradient(145deg,#151b25fa,#090f18fc 70%)}
+.neural-leaf.selected{background:linear-gradient(100deg,#688ab336,#101b2bdc)}
+@media(prefers-reduced-motion:reduce){.cosmic-backdrop{transition:none}}

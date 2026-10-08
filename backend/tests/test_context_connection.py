@@ -1,6 +1,7 @@
 """Independent account/folder proof and owner selection; synthetic, not real platform compatibility."""
 
 import json
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 
@@ -113,19 +114,23 @@ def test_login_only_cannot_invent_folder_and_repeat_different_scope_not_overwrit
     assert caught.value.code == "source_scope_exists"
 
 
-def test_proof_expired_or_future_and_failed_login_clears_selection(env):
+def test_connection_does_not_expire_with_time_but_actual_login_failure_clears_it(env):
     proof = record(env, folders=batch())
     state = env[0].snapshot()
     stamp = datetime.fromisoformat(proof["observed_at"])
-    for now in [stamp - timedelta(seconds=1), stamp + timedelta(seconds=901)]:
+    for now in [stamp + timedelta(seconds=901), stamp + timedelta(days=30)]:
         status = ConnectionCatalog.status_from_state(state, now=now.isoformat())
-        assert status["state"] == "stale" and not status["folders"] and not status["complete"]
+        assert status["state"] == "verified" and len(status["folders"]) == 2 and status["complete"]
+        assert status["expires_at"] is None
+    assert ConnectionCatalog.status_from_state(state, now=(stamp - timedelta(seconds=1)).isoformat())["state"] == "stale"
 
     def rejected(**kwargs):
         raise ContextError("source_login_required", "合成未登录")
 
     with pytest.raises(ContextError):
-        ConnectionWorkflow(env[0], SimpleNamespace(account=rejected)).observe()
+        ConnectionWorkflow(
+            env[0], SimpleNamespace(account=rejected, connection_observation=nullcontext)
+        ).observe()
     assert ConnectionCatalog(env[0]).status()["state"] == "unverified"
     with pytest.raises(ContextError):
         SourceManagement(env[0]).create_self(**args(proof["version"]))
@@ -157,6 +162,27 @@ def test_concurrent_observation_does_not_overwrite_new_account(env):
     assert caught.value.code == "source_connection_changed" and env[0].snapshot() == before
     with pytest.raises(ContextError):
         catalog.record(ACCOUNT, expected_version=proof["version"], folders=FolderBatch())
+
+
+@pytest.mark.parametrize("code", ["source_site_unavailable", "source_access_required", "source_shape_changed"])
+def test_folder_failure_preserves_actual_account_and_liked_saved_selection(env, code):
+    def discover(**_):
+        # Account recognition is visible before optional folder loading finishes.
+        assert ConnectionCatalog(env[0]).status()["state"] == "verified"
+        raise ContextError(code, "合成收藏夹失败")
+
+    result = ConnectionWorkflow(env[0], SimpleNamespace(
+        account=lambda **_: ACCOUNT, fetch_collections=discover,
+        connection_observation=nullcontext,
+    )).observe(discover=True)
+    assert result["state"] == "verified" and result["error_code"] == code
+    assert not result["folders_observed"] and not result["folders"]
+    for kind in ("liked", "saved"):
+        SourceManagement(env[0]).create_self(**args(result["version"], kind=kind, collection_id=None))
+    with pytest.raises(ContextError) as caught:
+        SourceManagement(env[0]).create_self(**args(result["version"]))
+    assert caught.value.code == "source_folder_unverified"
+    assert not env[0].snapshot()["jobs"] and not env[0].snapshot()["items"]
 
 
 @pytest.mark.parametrize(
@@ -261,6 +287,98 @@ def test_account_switch_after_discovery_never_commits_folders(env, monkeypatch):
     assert caught.value.code == "source_account_changed" and page.closed
     assert ConnectionCatalog(env[0]).status()["state"] == "unverified"
     assert not ConnectionCatalog(env[0]).status()["folders"]
+
+
+@pytest.mark.parametrize("ending", ["success", "account_changed", "cancelled", "folder_rejected"])
+def test_discovery_reuses_one_page_with_fresh_final_account_and_cleans_up(env, ending):
+    other = account_payload(user={"uid": "999", "sec_uid": "Other", "nickname": "另一个账号"})
+
+    class Page(AccountPage):
+        def __init__(self):
+            super().__init__([])
+            self.visits, self.listeners, self.routes = [], [], []
+            self.close_count = 0
+
+        def on(self, event, callback):
+            self.listeners.append(callback)
+
+        def remove_listener(self, event, callback):
+            self.listeners.remove(callback)
+
+        def route(self, pattern, handler):
+            self.routes.append(handler)
+
+        def unroute(self, pattern, handler):
+            self.routes.remove(handler)
+
+        def goto(self, url, **kwargs):
+            assert not self.closed and len(self.listeners) == len(self.routes) == 1
+            self.visits.append(url)
+            self.url = url
+            if "favorite_collection" in url:
+                assert kwargs["wait_until"] == "commit"
+                assert "showSubTab=favorite_folder" in url
+                path = "/aweme/v1/web/collects/list/?cursor=0"
+                value = folders(status_code=8) if ending == "folder_rejected" else folders()
+            else:
+                path = "/aweme/v1/web/user/profile/self/"
+                value = other if ending == "account_changed" and len(self.visits) == 3 else account_payload()
+            for callback in tuple(self.listeners):
+                callback(
+                    SimpleNamespace(
+                        url="https://www.douyin.com" + path,
+                        status=200,
+                        headers={},
+                        body=lambda: json.dumps(value).encode(),
+                    )
+                )
+
+        def close(self):
+            self.close_count += 1
+            super().close()
+
+    page, allocations = Page(), []
+
+    def new_page():
+        allocations.append(1)
+        return page
+
+    source = DouyinBrowserSource(SimpleNamespace(headless=False, context=SimpleNamespace(new_page=new_page)))
+    workflow = ConnectionWorkflow(env[0], source)
+
+    def cancelled():
+        return ending == "cancelled" and len(page.visits) >= 2
+
+    if ending == "success":
+        result = workflow.observe(discover=True, cancelled=cancelled)
+        assert result["state"] == "verified" and len(result["folders"]) == 2
+    elif ending == "folder_rejected":
+        status = workflow.observe(discover=True, cancelled=cancelled)
+        assert status["state"] == "verified"
+        assert status["display_name"] == ACCOUNT.display_name
+        assert status["error_code"] == "source_access_required"
+        assert not status["folders_observed"] and not status["folders"]
+    else:
+        with pytest.raises(ContextError) as caught:
+            workflow.observe(discover=True, cancelled=cancelled)
+        assert (
+            caught.value.code
+            == {
+                "account_changed": "source_account_changed",
+                "cancelled": "connection_cancelled",
+                "folder_rejected": "source_access_required",
+            }[ending]
+        )
+        assert ConnectionCatalog(env[0]).status()["state"] == ("verified" if ending == "cancelled" else "unverified")
+        assert not ConnectionCatalog(env[0]).status()["folders"]
+    assert allocations == [1] and page.close_count == 1
+    assert not page.listeners and not page.routes
+    assert source._connection_page is None and source._connection_account is None
+    assert page.visits == [
+        "https://www.douyin.com/user/self",
+        "https://www.douyin.com/user/self?showSubTab=favorite_folder&showTab=favorite_collection",
+    ] + (["https://www.douyin.com/user/self"] if ending in {"success", "account_changed"} else [])
+    assert not env[0].snapshot()["jobs"] and not env[0].snapshot()["items"]
 
 
 def test_owner_http_and_default_read_permissions_unchanged(managed, env):

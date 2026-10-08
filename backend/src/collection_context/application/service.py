@@ -32,7 +32,23 @@ def bounded_integer(value: int, name: str, minimum: int, maximum: int) -> int:
     return value
 
 
+def public_coverage(value: Any) -> Any:
+    """Progress metadata must not re-send the entire OCR audit with every read."""
+    if isinstance(value, dict):
+        output = {}
+        for key, part in value.items():
+            if key in {"ocr_records", "duplicate_occurrences"}:
+                output[key + "_count"] = len(part) if isinstance(part, list) else 0
+            else:
+                output[key] = public_coverage(part)
+        return output
+    if isinstance(value, list):
+        return [public_coverage(part) for part in value]
+    return value
+
+
 def public_item(item: dict[str, Any]) -> dict[str, Any]:
+    saved = item.get("downloaded_media") or {}
     return {
         "material_ref": item["id"],
         "title": item["title"],
@@ -44,6 +60,9 @@ def public_item(item: dict[str, Any]) -> dict[str, Any]:
         "first_observed_at": item["first_observed_at"],
         "last_observed_at": item["last_observed_at"],
         "relations": list(item["relations"].values()),
+        "prepared_input": item.get("prepared_input"),
+        "media_saved": bool(item.get("prepared_input") or saved.get("content_hash") == item["content_hash"]
+            and saved.get("source_asset_hash") == item.get("source_asset_hash") and saved.get("originals")),
     }
 
 
@@ -95,6 +114,7 @@ class ContextService:
                     "artifact_states": {
                         kind: a["state"] if is_current(item, a) else "stale"
                         for kind, a in item["artifacts"].items()
+                        if kind in ARTIFACT_KINDS
                     },
                     "evidence_checked": False,
                     "content_untrusted": True,
@@ -118,6 +138,10 @@ class ContextService:
             job_counts[job["state"]] = job_counts.get(job["state"], 0) + 1
         return {
             "total_items": len(items),
+            "source_counts": {
+                kind: sum(any(r["kind"] == kind for r in item["relations"].values()) for item in items)
+                for kind in ("liked", "saved", "collection", "creator", "link")
+            },
             "job_counts": job_counts,
             "audio_missing": sum(
                 "audio" not in item["artifacts"] for item in items if not audio_not_applicable(item)
@@ -159,7 +183,7 @@ class ContextService:
                 "version": artifact["version"],
                 "created_at": artifact["created_at"],
                 "processor_version": artifact["processor_version"],
-                "coverage": artifact["coverage"],
+                "coverage": public_coverage(artifact["coverage"]),
             }
         return {
             **public_item(item),
@@ -200,7 +224,7 @@ class ContextService:
             text = artifact_bytes(self.store, item, artifact).decode("utf-8")
             current_version = stored["version"]
             output_state = stored["state"] if is_current(item, stored) else "stale"
-            coverage = stored["coverage"]
+            coverage = public_coverage(stored["coverage"])
         if version is not None and version != current_version:
             raise ContextError("version_changed", "正文版本已变更；请从开头重新读取。", retryable=True)
         if offset > len(text):

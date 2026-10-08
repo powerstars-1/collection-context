@@ -63,6 +63,24 @@ def test_job_updates_do_not_invalidate_index(library):
     assert ContextService(library).search("UI")["total_matches"] == 1
 
 
+def test_retired_merged_output_is_not_readable_writable_or_searchable(library):
+    item = add(library)
+    save(library, item, 'audio', '独立转写保留')
+    # Simulate an old library/backup manifest without using the retired writer.
+    def legacy(state):
+        artifact = dict(state['items'][item['id']]['artifacts']['audio'])
+        state['items'][item['id']]['artifacts']['readable'] = artifact
+    library.transact(legacy)
+    service = ContextService(library)
+    error('invalid_artifact', lambda: service.read(item['id'], artifact='readable'))
+    error('invalid_artifact', lambda: save(library, item, 'readable', '不应生成'))
+    assert 'readable' not in service.status(item['id'])['artifacts']
+    assert 'readable' not in service.list_items()['items'][0]['artifact_states']
+    assert 'readable' not in service.search('独立转写')['items'][0]['matched_artifacts']
+    assert service.read(item['id'], artifact='audio')['text'] == '独立转写保留'
+    assert 'readable' not in FileIndex._readable_markdown(library.get(item['id'])).decode()
+
+
 def test_metadata_changes_automatically_reindex_and_hide_stale_artifacts(library):
     item = add(library)
     save(library, item)

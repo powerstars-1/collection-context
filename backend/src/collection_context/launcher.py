@@ -46,7 +46,9 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="明确同意只初始化不存在或空的目录；绝不覆盖非空目录",
     )
-    result.add_argument("--no-browser", action="store_true", help="不自动打开浏览器，适合无桌面 Linux")
+    result.add_argument("--no-browser", action="store_true", help="不自动打开管理页；不影响桌面抖音登录窗口")
+    result.add_argument("--source-connect-headless", action="store_true", default=None,
+                        help="明确让抖音连接浏览器无界面运行；未指定时按桌面环境判断")
     result.add_argument("--diagnose", action="store_true", help="只输出脱敏检查报告，不创建或修改资料库")
     result.add_argument(
         "--legacy-vault", action="store_true", help="明确只读连接 workspace 指向的旧库；访问配置在库外"
@@ -260,11 +262,14 @@ def launch(
     stop_event: threading.Event | None = None,
     capabilities: LauncherCapabilities | None = None,
     legacy_vault: bool = False,
+    source_connect_headless: bool | None = None,
 ) -> int:
     if stop_event is not None and stop_event.is_set():
         return 0
     if type(legacy_vault) is not bool or legacy_vault and (initialize_empty or capabilities is not None):
         raise ContextError("launcher_capabilities_invalid", "旧库只读模式不接受新建资料库或处理能力。")
+    if source_connect_headless is not None and type(source_connect_headless) is not bool:
+        raise ContextError("invalid_argument", "抖音浏览器模式须为明确的布尔值。")
     if legacy_vault:
         from collection_context.application.legacy_desktop import legacy_startup_report
 
@@ -306,20 +311,21 @@ def launch(
             def cancel_owner_access(principal: str, token: str) -> None:
                 revoke_legacy_owner_access(store, principal, token)
 
-        _ensure_owner_access(
-            store, output, owner_presenter=owner_presenter, cancel_owner_access=cancel_owner_access
-        )
         if stop_event is not None and stop_event.is_set():
             print("启动已取消，资料库保持原位。", file=output)
             return 0
         registry = AccessRegistry(store)
         origin = f"http://{LOOPBACK}:{port}"
-        policy = AccessPolicy(origin, registry.credentials())
+        policy = AccessPolicy(origin, registry.credentials(), local_ui=True)
         print("正在加载本机管理页；首次启动可能需要几秒。", file=output)
         resources = None
         if not legacy_vault:
             assert capabilities is not None
-            resources = cleanup.enter_context(launcher_resources(capabilities, headless=no_browser))
+            # Opening the management page and showing the source-login browser
+            # are independent. A launchd/service launch may suppress the former
+            # while a Mac/Windows owner still needs the latter to sign in.
+            source_headless = not _desktop_available() if source_connect_headless is None else source_connect_headless
+            resources = cleanup.enter_context(launcher_resources(capabilities, headless=source_headless))
         app = create_app(
             store.files.root,
             policy,
@@ -404,6 +410,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             port=args.port,
             initialize_empty=args.initialize_empty,
             no_browser=args.no_browser,
+            source_connect_headless=args.source_connect_headless,
             output=sys.stdout,
             legacy_vault=args.legacy_vault,
         )

@@ -10,6 +10,7 @@ from collection_context.application.contracts import ContextError
 from collection_context.infrastructure.storage import KernelLease
 from collection_context.workflows.addition import AdditionWorkflow
 from collection_context.workflows.extraction import ExtractionWorkflow
+from collection_context.workflows.media_preparation import MediaPreparation
 from collection_context.workflows.policy import execution_allowed
 from collection_context.workflows.scheduling import ProcessingSchedule
 from collection_context.workflows.source_schedule import SourceSchedule
@@ -58,6 +59,7 @@ class BackgroundWorker:
         if sync_workflow is not None and sync_workflow.store is not self.store:
             raise ContextError("invalid_workspace", "同步与处理必须属于同一个资料库。")
         self.sync_workflow = sync_workflow
+        self.media_preparation = MediaPreparation(self.store, sync_workflow.runtime_dir if sync_workflow else None)
         self.addition = AdditionWorkflow(
             self.store,
             sync_workflow.source_factory if sync_workflow else None,
@@ -125,6 +127,8 @@ class BackgroundWorker:
             )
             and job["state"] == "queued"
             and (
+                job["principal"] == "local_owner" and "media_preparation" in job["payload"]
+                or
                 allow_model_calls
                 and job["kind"] == "process"
                 and "extraction" in job["payload"]
@@ -145,7 +149,9 @@ class BackgroundWorker:
                 break
             lease.check()
             try:
-                if job["kind"] == "add":
+                if "media_preparation" in job["payload"]:
+                    result = self.media_preparation.run(job["id"])
+                elif job["kind"] == "add":
                     result = self.addition.run(job["id"], principal=job["principal"])
                 elif job["kind"] == "sync":
                     assert self.sync_workflow is not None

@@ -177,19 +177,24 @@ def test_mid_session_binary_or_coherent_receipt_change_stops_next_execution(
     assert not store.get(item["id"]).get("prepared_input")
 
 
-def test_missing_fixed_ocr_blocks_before_decoder_or_library_write(store, tmp_path, monkeypatch):
+def test_missing_fixed_ocr_retains_independent_audio(store, tmp_path, monkeypatch):
+    from test_context_processing_stages import audio
     runtime, _ = fake_runtime(tmp_path)
     item = add(store)
-    before = store.snapshot()
-    monkeypatch.setattr(
-        subprocess, "Popen", lambda *args, **kwargs: pytest.fail("Missing OCR must not enter decoder")
-    )
-    monkeypatch.setattr(
-        shutil, "which", lambda *args, **kwargs: pytest.fail("Must not borrow system OCR/media")
-    )
-    with pytest.raises(ContextError) as caught:
-        PreparedInputs(store, runtime_dir=runtime).prepare_video(item["id"], b"original-fixture")
-    assert caught.value.code == "runtime_dependency_missing" and store.snapshot() == before
+    class Media:
+        strategy_hash = "audio-independent"
+        info = SimpleNamespace(has_audio=True)
+        def __init__(self, *args, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def audio_segments(self): return [audio()]
+        def scan_frames(self): pytest.fail("Missing OCR must not enter visual scanning")
+    monkeypatch.setattr("collection_context.processing.inputs._RuntimeLocalMedia", Media)
+    identity = PreparedInputs(store, runtime_dir=runtime).prepare_video(item["id"], b"original-fixture")
+    payload = PreparedInputs(store).load(identity)
+    assert len(payload["audio"]) == 1 and payload["frames"] == []
+    assert payload["coverage"]["preparation_errors"]["vision"]["code"] == "runtime_dependency_missing"
+    assert payload["coverage"]["complete"] is False
 
 
 def test_prepared_video_connects_ocr_records_selection_and_originals(store, tmp_path, monkeypatch):

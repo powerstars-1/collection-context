@@ -8,7 +8,7 @@ from typing import Any
 from collection_context.application.contracts import ContextError, digest
 from collection_context.infrastructure.secrets import CredentialBackend
 from collection_context.library.store import LibraryStore
-from collection_context.processing.inputs import PreparedInputs
+from collection_context.processing.inputs import PreparedInputs, preparation_error
 from collection_context.processing.profiles import ModelCatalog
 from collection_context.processing.stages import (
     LEGACY_SUMMARY_VERSION,
@@ -42,6 +42,9 @@ class ExtractionWorkflow:
         )
 
     def _build(self, context: dict[str, Any], *, planning: bool = False) -> list[Stage]:
+        if isinstance(context, dict) and context.get("workflow") == "model_check":
+            from collection_context.processing.model_check import build
+            return build(self.store, self.resolve_secret, context, planning=planning)
         if isinstance(context, dict) and context.get("workflow") == "summary_refresh":
             from collection_context.processing.summary_refresh import build
 
@@ -74,10 +77,11 @@ class ExtractionWorkflow:
         if any(
             value.get("owner_edit")
             for kind, value in current["artifacts"].items()
-            if kind in {"original", "audio", "screen", "image", "summary", "readable"}
+            if kind in {"original", "audio", "screen", "image", "summary"}
         ):
             raise ContextError("owner_edit_conflict", "资料含已确认的人工修改，未覆盖或提交模型请求。")
-        roles = {"vision", "summary"} | ({"audio"} if payload["audio"] else set())
+        use_vision = bool(payload["frames"]) and not payload["coverage"].get("audio_only")
+        roles = {"summary"} | ({"vision"} if use_vision else set()) | ({"audio"} if payload["audio"] else set())
         if not isinstance(context["model_profiles"], dict) or set(context["model_profiles"]) != roles:
             raise ContextError("model_config_missing", "任务模型角色不完整。")
         resolve = (lambda _: "planning-only-placeholder") if planning else self.resolve_secret
@@ -90,7 +94,7 @@ class ExtractionWorkflow:
         segments = self.inputs.audio(payload)
         if segments:
             stages.extend(audio_stage(ref, segment, clients["audio"]) for segment in segments)
-        else:
+        elif not preparation_error(payload["coverage"], "audio"):
             stages.append(
                 Stage(
                     "audio_not_applicable",
@@ -102,7 +106,19 @@ class ExtractionWorkflow:
                     ),
                 )
             )
-        stages.extend(vision_stage(ref, frame, clients["vision"]) for frame in self.inputs.frames(payload))
+        if use_vision:
+            stages.extend(vision_stage(ref, frame, clients["vision"]) for frame in self.inputs.frames(payload))
+        for role in ("audio", "vision"):
+            error = preparation_error(payload["coverage"], role)
+            if error == "vision_deferred" and payload["coverage"].get("audio_only"):
+                stages.append(Stage(role + "_preparation_failed", digest([ref, context["input_id"], role, error]),
+                    VERSION, lambda _: StageOutcome({"kind": "screen", "applicable": False,
+                        "reason": "本次选择只转写音频，画面跳过。"}, status="not_applicable")))
+                continue
+            if error:
+                def missing(_, code=error, branch=role):
+                    raise ContextError(code, f"{branch} 本地准备失败；其他成功部分继续提取，未伪造缺失内容。")
+                stages.append(Stage(role + "_preparation_failed", digest([ref, context["input_id"], role, error]), VERSION, missing))
         evidence = tuple(stage.name for stage in stages)
         combined = summary_stage(
             ref,
@@ -152,7 +168,7 @@ class ExtractionWorkflow:
     ) -> dict[str, Any]:
         """Registered plan only, for atomic manual/history/automatic admission; no secrets or requests."""
         payload = self.inputs.load(input_id)
-        roles = ("audio", "vision", "summary") if payload["audio"] else ("vision", "summary")
+        roles = tuple(role for role, present in (("audio", payload["audio"]), ("vision", payload["frames"] and not payload["coverage"].get("audio_only")), ("summary", True)) if present)
         if model_profiles is not None and (
             not isinstance(model_profiles, dict)
             or not set(roles) <= set(model_profiles)

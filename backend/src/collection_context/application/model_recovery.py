@@ -50,7 +50,13 @@ class ModelRecovery:
                 "name": item["name"],
                 "state": job["stages"].get(item["name"], {}).get("state", "not_started"),
                 "paid": item["paid"],
-                "selectable": job["stages"].get(item["name"], {}).get("state") not in COMPLETE_STATES,
+                "preparation_required": item["name"].endswith("_preparation_failed")
+                    and job["stages"].get(item["name"], {}).get("state") != "not_applicable"
+                    and (job["stages"].get(item["name"], {}).get("error") or {}).get("code") != "vision_deferred",
+                "selectable": (
+                    job["stages"].get(item["name"], {}).get("state") not in COMPLETE_STATES
+                    and not item["name"].endswith("_preparation_failed")
+                ),
             }
             for item in descriptors
         ]
@@ -109,7 +115,8 @@ class ModelRecovery:
             "stages": candidates,
             "selected_stages": stages,
             "affected_stages": runnable,
-            "reused_stages": [item["name"] for item in candidates if not item["selectable"]],
+            "reused_stages": [item["name"] for item in candidates if item["state"] in COMPLETE_STATES],
+            "preparation_required": [item["name"] for item in candidates if item["preparation_required"]],
             "max_calls": max_calls,
             "unknown_calls": unknown,
             "fixed_models": fixed_models,

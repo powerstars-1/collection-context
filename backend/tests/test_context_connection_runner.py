@@ -13,11 +13,13 @@ from test_context_source_pages import AccountPage, account_payload
 
 from collection_context.application.connection_runner import ConnectionRunner, separate_browser
 from collection_context.application.contracts import ContextError
+from collection_context.application.source_management import SourceManagement
 from collection_context.interfaces.access import AccessRegistry
 from collection_context.interfaces.http import create_app
 from collection_context.interfaces.security import AccessPolicy
 from collection_context.interfaces.server import main as server_main
 from collection_context.sources.browser_source import DouyinBrowserSource
+from collection_context.sources.account import self_account
 from collection_context.workflows.connection import ConnectionCatalog, ConnectionWorkflow
 
 pytest.importorskip("fastapi")
@@ -157,7 +159,7 @@ def test_cancel_before_browser_and_during_page_closes_resources(env):
     with pytest.raises(ContextError) as caught:
         ConnectionWorkflow(env[0], DouyinBrowserSource(browser)).observe(cancelled=cancelled)
     assert caught.value.code == "connection_cancelled" and page.closed
-    assert ConnectionCatalog(env[0]).status()["state"] == "unverified"
+    assert ConnectionCatalog(env[0]).status()["state"] == "not_connected"
     assert not env[0].snapshot()["jobs"]
 
 
@@ -232,4 +234,82 @@ def test_http_owner_only_csrf_no_bearer_or_paths(env, tmp_path):
         good = client.post("/v1/management/connection-start", json=args, headers=headers)
         assert good.json()["ok"] and terminal(runner)["state"] == "completed"
         assert called == ["check"]
+        assert client.post("/v1/management/connection-logout", json={}).status_code == 403
+        bad = client.post("/v1/management/connection-logout", json={"profile": "/private"}, headers=headers)
+        assert bad.json()["error"]["code"] == "invalid_argument"
+        good = client.post("/v1/management/connection-logout", json={}, headers=headers)
+        assert good.json()["ok"] and terminal(runner)["state"] == "completed"
+        assert called == ["check", "logout"]
     assert not runner.status()["enabled"]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_logout_clears_owned_login_pauses_timers_preserves_library(env, tmp_path, monkeypatch, failure):
+    store = env[0]
+    catalog = ConnectionCatalog(store)
+    proof = catalog.record(self_account(account_payload()), expected_version=None)
+    manager = SourceManagement(store)
+    scope = manager.create_self(kind="saved", collection_id=None, connection_version=proof["version"],
+                                limit=5, download=False, source_confirmed=True)
+    manager.timer(config_id=scope["config_id"], enabled=True, interval_minutes=60,
+                  reset_blocked=False, source_confirmed=True)
+    store.upsert({"native_id": "201", "media_type": "image", "title": "原创测试资料"},
+                 kind="saved", scope_id=scope["scope_id"])
+    before = store.snapshot()
+    events = []
+
+    class Browser:
+        def __init__(self, path, *, headless):
+            assert path == tmp_path / "own-browser" and headless
+
+        def __enter__(self):
+            events.append("enter")
+            return self
+
+        def clear_login(self):
+            events.append("clear")
+            if failure:
+                raise ContextError("source_logout_failed", "原创退出失败")
+
+        def __exit__(self, *_):
+            events.append("closed")
+
+    monkeypatch.setattr("collection_context.application.connection_runner.BrowserSession", Browser)
+    runner = ConnectionRunner(store.files.root, tmp_path / "own-browser")
+    try:
+        runner.start(mode="logout", source_confirmed=True)
+        result = terminal(runner)
+        after = store.snapshot()
+        assert events == ["enter", "clear", "closed"] and result["model_requests"] == 0
+        if failure:
+            assert result["state"] == "failed" and result["error_code"] == "source_logout_failed"
+            assert after == before and catalog.status()["state"] == "verified"
+        else:
+            assert result["state"] == "completed" and catalog.status()["state"] == "not_connected"
+            assert catalog.status()["display_name"] is None and catalog.status()["folders"] == []
+            assert not after["settings"]["auto_sync"]
+            assert all(not timer["enabled"] for timer in after["settings"]["sync_schedules"].values())
+            for field in ("items", "artifacts", "jobs", "sync_scope_configs", "sync_current_scopes"):
+                assert after.get(field) == before.get(field)
+    finally:
+        runner.close()
+
+
+def test_logout_refuses_active_source_job_before_opening_browser(env, tmp_path, monkeypatch):
+    catalog = ConnectionCatalog(env[0])
+    proof = catalog.record(self_account(account_payload()), expected_version=None)
+    manager = SourceManagement(env[0])
+    scope = manager.create_self(kind="saved", collection_id=None, connection_version=proof["version"],
+                                limit=5, download=False, source_confirmed=True)
+    manager.submit(config_id=scope["config_id"], idempotency_key="original-sync", source_confirmed=True)
+    before = env[0].snapshot()
+    monkeypatch.setattr("collection_context.application.connection_runner.BrowserSession",
+                        lambda *_args, **_kwargs: pytest.fail("must not clear an in-use login"))
+    runner = ConnectionRunner(env[0].files.root, tmp_path / "own-browser")
+    try:
+        runner.start(mode="logout", source_confirmed=True)
+        result = terminal(runner)
+        assert result["state"] == "failed" and result["error_code"] == "source_sync_busy"
+        assert env[0].snapshot() == before
+    finally:
+        runner.close()

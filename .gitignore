@@ -1,0 +1,37 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.venv-*/
+.env
+.env.local
+.env.*.local
+infra/we-mp-rss/data/
+
+# Private assets/runtime data: this working folder is not a public release package.
+/content-vault/
+/collection-workspace/
+/data/
+/downloads/
+/tmp/
+/.agent-teams/
+/backend/config/new_api_media.json
+/backend/config/tracked_douyin_users.json
+test-results/
+playwright-report/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+build/
+dist/
+*.egg-info/
+
+# Keep integrations in place; review licenses/install methods before release.
+/All-IN-ONE/
+/dYm/
+/we-mp-rss/
+/TrendRadar/
+/cheat-on-content/
+/khazix-skills/
+/last30days-skill/

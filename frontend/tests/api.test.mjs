@@ -234,3 +234,54 @@ test("agent setup honors abort and replaced-session rejection",async(t)=>{
   const controller=new AbortController();controller.abort();
   await assert.rejects(getAgentSetup(api.request,{signal:controller.signal}),{name:'AbortError'});
 });
+
+const framePath='/v1/collections/i_fixture/frames/input_fixture/f_fixture';
+test('saved frame downloads share the page request queue and use same-origin authentication',async(t)=>{
+  const finish=[];const calls=[];
+  installFetch(t,(path,options)=>{calls.push({path,options});return new Promise(resolve=>finish.push(resolve))});
+  const api=createApi();
+  const first=api.request('/v1/session'),second=api.image(framePath),third=api.image(framePath);
+  assert.equal(calls.length,2);
+  finish[0](response(200,{ok:true,data:{}}));await first;
+  await Promise.resolve();assert.equal(calls.length,3);
+  finish[1](new Response('png-fixture',{headers:{'Content-Type':'image/png'}}));
+  finish[2](new Response('jpg-fixture',{headers:{'Content-Type':'image/jpeg'}}));
+  const images=await Promise.all([second,third]);
+  assert.deepEqual(images.map(blob=>blob.type),['image/png','image/jpeg']);
+  assert.equal(calls[1].options.credentials,'same-origin');
+  assert.equal(calls[1].options.method,'GET');
+  assert.throws(()=>api.image('/v1/session'));
+  assert.throws(()=>api.image('https://external.invalid/image.png'));
+  assert.equal(calls.length,3);
+});
+
+test('frame downloads reject invalid images and preserve non-concurrency error codes without retrying',async(t)=>{
+  let calls=0;
+  installFetch(t,async()=>{calls++;return new Response('<svg/>',{headers:{'Content-Type':'image/svg+xml'}})});
+  await assert.rejects(createApi().image(framePath),/图片格式/);
+  globalThis.fetch=async()=>{calls++;return new Response('too large',{headers:{'Content-Type':'image/png','Content-Length':'10000001'}})};
+  await assert.rejects(createApi().image(framePath),/上限/);
+  globalThis.fetch=async()=>{calls++;return response(429,{ok:false,error:{code:'rate_limited',message:'稍后再试'}})};
+  await assert.rejects(createApi().image(framePath),err=>err.code==='rate_limited'&&err.status===429);
+  assert.equal(calls,3);
+});
+
+test('only confirmed local reads retry transient cross-tab concurrency; paid submissions never retry',async(t)=>{
+  let reads=0,submissions=0;
+  installFetch(t,async(path)=>{
+    if(path==='/v1/collections/list')return ++reads===1?response(429,{ok:false,error:{code:'concurrency_limited'}}):response(200,{ok:true,data:{items:[]}});
+    submissions++;return response(429,{ok:false,error:{code:'concurrency_limited'}});
+  });
+  const api=createApi();
+  assert.deepEqual(await api.request('/v1/collections/list',{limit:20}),{items:[]});
+  assert.equal(reads,2);
+  await assert.rejects(api.request('/v1/management/history',{fee_confirmed:true}));
+  assert.equal(submissions,1);
+});
+
+test('aborting a transient-read wait prevents its next request',async(t)=>{
+  const controller=new AbortController();let calls=0;
+  installFetch(t,async()=>{calls++;const result=response(429,{ok:false,error:{code:'concurrency_limited'}});setTimeout(()=>controller.abort(),10);return result});
+  await assert.rejects(createApi().request('/v1/collections/list',{}, {signal:controller.signal}),{name:'AbortError'});
+  assert.equal(calls,1);
+});

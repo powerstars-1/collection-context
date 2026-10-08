@@ -29,7 +29,7 @@ def library(tmp_path):
         item["id"],
         {
             kind: {"text": "原始" + kind, "processor_version": "test"}
-            for kind in ("original", "screen", "audio", "image", "summary", "readable", "user_note")
+            for kind in ("original", "screen", "audio", "image", "summary", "user_note")
         },
         expected_content_hash=item["content_hash"],
     )
@@ -65,12 +65,11 @@ def fails(code, action):
 @pytest.mark.parametrize(
     "kind,stale",
     [
-        ("original", ["readable", "summary"]),
-        ("audio", ["readable", "summary"]),
-        ("screen", ["readable", "summary"]),
-        ("image", ["readable", "summary"]),
-        ("summary", ["readable"]),
-        ("readable", []),
+        ("original", ["summary"]),
+        ("audio", ["summary"]),
+        ("screen", ["summary"]),
+        ("image", ["summary"]),
+        ("summary", []),
         ("user_note", []),
     ],
 )
@@ -103,7 +102,7 @@ def test_confirmed_snapshot_reindexes_invalidates_and_preserves_original(library
     assert updated["artifacts"]["user_note"]["state"] == "ready"
     assert is_current(updated, updated["artifacts"][kind])
     assert ContextService(store).read(item["id"], artifact=kind)["text"] == "修正关键词：蓝莓线框模板"
-    if kind in {"screen", "audio", "summary", "readable", "image"}:
+    if kind in {"screen", "audio", "summary", "image"}:
         assert ContextService(store).search("蓝莓")["total_matches"] == 1
     fails(
         "owner_edit_conflict",

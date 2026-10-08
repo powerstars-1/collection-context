@@ -78,7 +78,7 @@ def build_server(gateway: ReadGateway, additions: AgentAdditionGateway | None = 
         max_chars: int = 4000,
         version: str | None = None,
     ) -> Any:
-        """按资料引用读有限正文，不能传文件路径。artifact:original/audio/screen/summary/readable/image/user_note。继续读取必须携带上页version与next_offset。stale和缺口不代表完整准确提取。"""
+        """按资料引用读有限正文，不能传文件路径。artifact:original/audio/screen/summary/image/user_note。继续读取必须携带上页version与next_offset。stale和缺口不代表完整准确提取。"""
         return await invoke(
             "read_collection",
             {

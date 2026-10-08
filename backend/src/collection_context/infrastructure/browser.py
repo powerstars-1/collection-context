@@ -148,6 +148,27 @@ class BrowserSession:
             self.close()
             raise
 
+    def clear_login(self) -> None:
+        """Forget this product's Douyin login, without deleting its profile or library."""
+        if self.context is None:
+            raise ContextError("browser_not_running", "独立浏览器尚未启动。")
+        self.check()
+        self.context.clear_cookies()
+        page = self.context.new_page()
+        session = None
+        try:
+            session = self.context.new_cdp_session(page)
+            self.check()
+            session.send("Storage.clearDataForOrigin", {
+                "origin": "https://www.douyin.com", "storageTypes": "all",
+            })
+        except Exception:
+            raise ContextError("source_logout_failed", "退出登录未完成，请重试。") from None
+        finally:
+            if session is not None:
+                session.detach()
+            page.close()
+
     def close(self):
         failed = False
         if self._context is not None:

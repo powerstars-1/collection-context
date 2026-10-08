@@ -100,6 +100,9 @@ def test_read_all_evidence_and_search_without_writes_or_network(legacy_vault, mo
     reader = LegacyLayoutReader(vault if direct_vault else root)
     try:
         for kind, body in bodies.items():
+            if kind == 'readable':
+                failure('invalid_artifact', lambda: reader.read(ref, artifact=kind))
+                continue
             result = reader.read(ref, artifact=kind)
             assert result["text"] == body
             assert result["content_untrusted"] and result["model_requests"] == 0
@@ -108,7 +111,7 @@ def test_read_all_evidence_and_search_without_writes_or_network(legacy_vault, mo
         result = reader.search("rounded-xl")
         assert result["items"][0]["material_ref"] == ref
         assert "screen" in result["items"][0]["matched_artifacts"]
-        assert reader.status(ref)["artifacts"].keys() == bodies.keys()
+        assert reader.status(ref)["artifacts"].keys() == bodies.keys() - {'readable'}
         assert reader.overview()["model_requests"] == 0
     finally:
         reader.close()

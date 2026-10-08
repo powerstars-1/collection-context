@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from collection_context.application.contracts import ContextError, digest, utc_now, validate_source
+from collection_context.infrastructure.public_http import PublicDownloadError
+from collection_context.infrastructure.download_limits import download_max_bytes
 from collection_context.library.index import FileIndex
 from collection_context.library.store import LibraryStore
 from collection_context.processing.inputs import PreparedInputs
@@ -27,7 +29,7 @@ class IngestionWorkflow:
         runtime_dir: Path | None = None,
     ):
         self.store, self.source = store, source
-        self.downloads = downloads or DouyinDownloads()
+        self.downloads = downloads or DouyinDownloads(max_bytes=download_max_bytes(store.snapshot()["settings"]))
         self.runtime_dir = runtime_dir
 
     def add_link(self, url: str, *, download: bool = False) -> dict[str, Any]:
@@ -118,6 +120,7 @@ class IngestionWorkflow:
                 current.pop("prepared_input", None)
                 current.pop("media_preparation", None)
                 current.pop("source_input_binding", None)
+                current.pop("downloaded_media", None)
             current["source_asset_hash"] = source_asset_hash
             return changed
 
@@ -167,21 +170,47 @@ class IngestionWorkflow:
             identity = registry.reusable_source(item["id"], source_asset_hash)
             reused = identity is not None
             if identity is None:
-                media = self.downloads.fetch(observed)
-                if item["media_type"] == "image":
-                    identity = registry.prepare_images(
-                        item["id"], media, expected_content_hash=item["content_hash"]
-                    )
-                else:
-                    if len(media) != 1:
-                        raise ContextError("source_shape_changed", "视频原媒体数量异常。")
-                    identity = registry.prepare_video(
-                        item["id"],
-                        media[0][0],
-                        mime_type=media[0][1],
-                        expected_content_hash=item["content_hash"],
-                    )
-                registry.bind_source(item["id"], identity, source_asset_hash, item["content_hash"])
+                media = registry.source_media(item["id"], source_asset_hash)
+                reused = media is not None
+                if media is None:
+                    try:
+                        media = self.downloads.fetch(observed)
+                    except PublicDownloadError as error:
+                        if error.http_status not in {403, 404, 410}:
+                            raise
+                        # Lists can carry expired CDN URLs. Reopen this exact
+                        # work once through the normal page, not a signed API.
+                        fresh = self.source.fetch_item(observed.source["source_url"])
+                        if fresh.source != observed.source:
+                            raise ContextError("source_snapshot_changed", "作品内容在下载前变化，请重新同步。") from None
+                        media = self.downloads.fetch(fresh)
+                        fresh_hash = source_asset_identity(fresh)
+                        if fresh_hash != source_asset_hash:
+                            def refresh(state):
+                                current = state["items"][item["id"]]
+                                if current["excluded"] or current["content_hash"] != item["content_hash"] or current.get("source_asset_hash") != source_asset_hash:
+                                    raise ContextError("version_changed", "下载期间资料已变化。")
+                                for name, artifact in current["artifacts"].items():
+                                    if name not in {"original", "user_note"}:
+                                        artifact["state"] = "stale"
+                                for key in ("prepared_input", "media_preparation", "source_input_binding", "downloaded_media"):
+                                    current.pop(key, None)
+                                current["source_asset_hash"] = fresh_hash
+                            self.store.transact(refresh)
+                            source_asset_hash = fresh_hash
+                            output["source_assets_changed"] = True
+                    registry.save_source_media(item["id"], media, source_asset_hash=source_asset_hash, content_hash=item["content_hash"])
+                # Download success is not the same as OCR/frame readiness.
+                try:
+                    if item["media_type"] == "image":
+                        identity = registry.prepare_images(item["id"], media, expected_content_hash=item["content_hash"])
+                    else:
+                        identity = registry.prepare_video(item["id"], media[0][0], mime_type=media[0][1], expected_content_hash=item["content_hash"])
+                    registry.bind_source(item["id"], identity, source_asset_hash, item["content_hash"])
+                except ContextError as error:
+                    output.update(download="ready", download_reused=reused, preparation="blocked", preparation_error=error.as_dict())
+                    FileIndex(self.store).rebuild()
+                    return output
             output.update(download="ready", input_id=identity, download_reused=reused)
         except ContextError as error:
             # A failed download does not hide successfully committed metadata or trigger a model request.

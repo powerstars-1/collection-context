@@ -128,8 +128,15 @@ class ProcessingSchedule:
                 break
             input_id = item.get("prepared_input")
             marker = digest([identity, item["id"], input_id])
+            manual_preparation = any(
+                job["payload"].get("media_preparation", {}).get("material_ref") == item["id"]
+                and (job["state"] in {"queued", "running"}
+                     or job.get("stages", {}).get("link_import", {}).get("result", {}).get("result", {}).get("input_id") == input_id)
+                for job in state["jobs"].values()
+            )
             if (
                 item["excluded"]
+                or manual_preparation
                 or item.get("first_observed_principal") != "local_owner"
                 or not input_id
                 or item.get("first_observed_generation", -1) <= policy["boundary_generation"]
@@ -321,6 +328,13 @@ class ProcessingSchedule:
                 if previous["fingerprint"] != fingerprint:
                     raise ContextError("idempotency_conflict", "此历史批次键已用于不同资料、配置或额度。")
                 return previous
+            if any(
+                job["principal"] == "local_owner" and job["kind"] == "process"
+                and job["state"] in {"queued", "running"}
+                and job["payload"].get("extraction", {}).get("input_id") in input_ids
+                for job in state["jobs"].values()
+            ):
+                raise ContextError("processing_already_queued", "所选资料已有提取任务，请查看任务进度，不必重复提交。")
             jobs = [mutation(state) for mutation in mutations]
             batch = {
                 "id": batch_id,

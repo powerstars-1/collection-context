@@ -66,6 +66,29 @@ def test_repeat_registration_never_overwrites_different_fixed_scope(managed, env
     assert result["error"]["code"] == "source_scope_exists" and env[0].snapshot() == before
 
 
+def test_remove_and_readd_preserves_saved_content_and_history_without_restart_of_timer(managed, env):
+    saved = create(managed).json()['data']
+    flow = SynchronizationWorkflow(env[0])
+    item = env[0].upsert({'native_id':'951','title':'原创来源资料'},kind='creator',scope_id=saved['scope_id'])['item']
+    env[0].save_artifact(item['id'],'screen','已保存的原创画面文字',processor_version='fixture',expected_content_hash=item['content_hash'])
+    job = flow.submit(saved['config_id'],idempotency_key='one-complete-round')
+    flow.jobs.start(job['id'])
+    flow.jobs.set_stage(job['id'],'source_sync',state_name='ready',input_hash='fixture',result={'imported':{},'coverage':{'committed_count':1}})
+    flow.jobs.finish(job['id'],'succeeded')
+    configure_timer(managed,saved['config_id'])
+    before = env[0].snapshot()
+    removed = post(managed,'source-remove',{'config_id':saved['config_id']}).json()
+    assert removed['ok'] and removed['data']['scopes']==[]
+    after = env[0].snapshot()
+    assert after['items']==before['items'] and after['jobs']==before['jobs']
+    assert after['settings']['sync_schedules'][saved['scope_id']]['enabled'] is False
+    recreated = create(managed).json()['data']
+    assert recreated['scope_id']==saved['scope_id']
+    current = post(managed,'sources',{}).json()['data']['scopes'][0]
+    assert current['timer']['enabled'] is False and current['history_count']==1
+    assert post(managed,'source-history',{'scope_id':saved['scope_id']}).json()['data']['runs'][0]['job_id']==job['id']
+
+
 def test_manual_source_needs_authority_and_is_atomic_idempotent(managed, env):
     config = create(managed).json()["data"]["config_id"]
     args = {"config_id": config, "idempotency_key": "same-source-operation", "source_confirmed": False}
@@ -87,6 +110,53 @@ def test_manual_source_needs_authority_and_is_atomic_idempotent(managed, env):
         "error_code": None,
     }
     assert not next(iter(before["jobs"].values()))["calls"]
+
+
+def test_source_report_distinguishes_text_download_and_preparation(managed, env):
+    config = create(managed, download=True).json()["data"]["config_id"]
+    workflow = SynchronizationWorkflow(env[0])
+    job = workflow.submit(config, idempotency_key="partial-download")
+
+    def finish(state):
+        current = state["jobs"][job["id"]]
+        current["state"] = "partial"
+        current["stages"]["source_sync"] = {"result": {"imported": {
+            "81": {"download": "ready", "preparation": "blocked"},
+            "82": {"download": "blocked", "error": {"code": "download_limit", "message": "媒体超过下载上限。"}},
+        }}}
+
+    env[0].transact(finish)
+    report = SourceManagement(env[0]).overview()["scopes"][0]["download_report"]
+    assert report["saved_count"] == report["failed_count"] == report["preparation_pending_count"] == 1
+    assert "处理设置" in report["error_message"] and "128 MB" not in report["error_message"]
+    assert not env[0].snapshot()["jobs"][job["id"]]["calls"]
+
+
+def test_source_can_sync_again_after_partial_and_keeps_both_runs(managed, env):
+    saved=create(managed,download=True).json()['data']
+    flow=SynchronizationWorkflow(env[0])
+    first=flow.submit(saved['config_id'],idempotency_key='first-round')
+    flow.jobs.start(first['id'])
+    flow.jobs.set_stage(first['id'],'source_sync',state_name='partial',input_hash='fixture',result={'imported':{'one':{'download':'ready'}},'coverage':{'committed_count':1,'limit_reached':True}})
+    flow.jobs.finish(first['id'],'partial')
+    second=post(managed,'source-submit',{'config_id':saved['config_id'],'idempotency_key':'next-round','source_confirmed':True}).json()['data']
+    assert second['state']=='queued' and second['job_id']!=first['id']
+    data=post(managed,'source-history',{'scope_id':saved['scope_id']}).json()['data']
+    assert data['total']==2 and {r['job_id'] for r in data['runs']}=={first['id'],second['job_id']}
+    assert env[0].snapshot()['jobs'][first['id']]['state']=='partial'
+
+
+def test_source_edit_does_not_change_last_run_report_or_job_plan(managed, env):
+    saved=create(managed,download=True).json()['data'];flow=SynchronizationWorkflow(env[0])
+    job=flow.submit(saved['config_id'],idempotency_key='old-settings');flow.jobs.start(job['id'])
+    flow.jobs.set_stage(job['id'],'source_sync',state_name='ready',input_hash='fixture',result={'imported':{'one':{'download':'ready'}},'coverage':{'committed_count':1,'limit_reached':True}})
+    flow.jobs.finish(job['id'],'succeeded')
+    edited=post(managed,'source-edit',{'config_id':saved['config_id'],'limit':10,'download':False}).json()['data']
+    assert edited['updated_source']['config_id']!=saved['config_id']
+    scope=edited['scopes'][0]
+    assert scope['limit']==10 and scope['latest_report']['limit']==5
+    assert scope['latest_report']['download'] is True and scope['download_report']['saved_count']==1
+    assert env[0].snapshot()['jobs'][job['id']]['payload']['sync']['config_id']==saved['config_id']
 
 
 def test_manual_submission_of_old_page_config_is_refused(managed, env):

@@ -1,9 +1,9 @@
-"""Own short-lived account/folder proof for owner selection, not session/cookie storage."""
+"""Remember the connected account until logout or observed login failure."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from collection_context.application.contracts import ContextError, digest, utc_now, valid_id, validate_time
@@ -12,7 +12,13 @@ from collection_context.sources.account import Account
 from collection_context.sources.browser_source import DouyinBrowserSource
 from collection_context.sources.collections import FolderBatch
 
-PROOF_SECONDS = 900
+# Folder discovery is optional account metadata, not proof of whether login succeeded.
+FOLDER_ERRORS = frozenset({
+    "source_site_unavailable", "source_access_required", "source_response_rejected",
+    "source_shape_changed", "source_limit", "source_cursor_invalid",
+    "source_cursor_mismatch", "source_cursor_stalled", "source_snapshot_changed",
+})
+LOGIN_FAILURES = frozenset({"source_login_required", "source_account_changed"})
 
 
 class ConnectionCatalog:
@@ -54,7 +60,7 @@ class ConnectionCatalog:
                     or not isinstance(account["display_name"], str)
                     or not 1 <= len(account["display_name"]) <= 500
                     or "\x00" in account["display_name"]
-                    or value["error_code"] is not None
+                    or value["error_code"] is not None and value["error_code"] not in FOLDER_ERRORS
                 ):
                     raise ValueError
             elif (
@@ -107,14 +113,16 @@ class ConnectionCatalog:
             }
         stamp = datetime.fromisoformat(value["observed_at"])
         current = datetime.fromisoformat(validate_time(now or utc_now()))
-        fresh = timedelta(0) <= current - stamp <= timedelta(seconds=PROOF_SECONDS)
+        # This is remembered connection state, not a 15-minute login lease.
+        # Actual synchronization checks the browser account again before reading.
+        fresh = current >= stamp
         account = value["account"]
         return {
-            "state": "verified" if account and fresh else "stale" if account else "unverified",
+            "state": "verified" if account and fresh else "stale" if account else "not_connected" if value["error_code"] == "source_logged_out" else "unverified",
             "version": value["version"],
             "display_name": account["display_name"] if account else None,
             "observed_at": value["observed_at"],
-            "expires_at": (stamp + timedelta(seconds=PROOF_SECONDS)).isoformat(),
+            "expires_at": None,
             "folders": value["folders"] if account and fresh else [],
             "folders_observed": bool(account and fresh and value["folders_observed"]),
             "complete": bool(account and fresh and value["complete"]),
@@ -124,6 +132,19 @@ class ConnectionCatalog:
 
     def status(self) -> dict:
         return self.status_from_state(self.store.snapshot())
+
+    @classmethod
+    def invalidate_in_state(cls, state: dict, account_ref: str, error_code: str) -> None:
+        """A real sync login failure invalidates only the account it actually checked."""
+        current = cls.record_from_state(state)
+        if error_code not in LOGIN_FAILURES or not current or not current["account"] or current["account"]["account_ref"] != account_ref:
+            return
+        value = {"account": None, "observed_at": utc_now(), "folders": [],
+                 "folders_observed": False, "complete": False, "error_code": error_code}
+        state["source_connection"] = {"version": "n_" + digest(value), **value}
+        for entry in state["settings"].get("sync_schedules", {}).values():
+            entry["enabled"] = False
+        state["settings"]["auto_sync"] = False
 
     def record(
         self,
@@ -155,6 +176,10 @@ class ConnectionCatalog:
                     "source_connection_changed", "连接状态已改变，请刷新；未覆盖新的账号证明。"
                 )
             state["source_connection"] = value
+            if error_code == "source_logged_out" or error_code in LOGIN_FAILURES:
+                for entry in state["settings"].get("sync_schedules", {}).values():
+                    entry["enabled"] = False
+                state["settings"]["auto_sync"] = False
 
         self.store.transact(change)
         return self.status()
@@ -164,7 +189,7 @@ class ConnectionCatalog:
         public = cls.status_from_state(state)
         value = cls.record_from_state(state)
         if public["state"] != "verified" or value is None:
-            raise ContextError("source_login_required", "本人账号证明缺失或已过期，请重新验证独立登录。")
+            raise ContextError("source_login_required", "请先连接抖音账号。")
         if public["version"] != version:
             raise ContextError("source_connection_changed", "账号或收藏夹观察已更新，请刷新后确认。")
         if kind not in {"liked", "saved", "collection"}:
@@ -204,23 +229,35 @@ class ConnectionWorkflow:
         if type(limit) is not int or not 1 <= limit <= 100:
             raise ContextError("invalid_source_limit", "收藏夹发现上限为1至100个。")
         before = self.catalog.status()["version"]
+        account = None
         try:
-            if cancelled is None:
-                account = self.source.account(interactive=interactive, timeout=timeout)
-            else:
-                account = self.source.account(interactive=interactive, timeout=timeout, cancelled=cancelled)
-            folders = None
-            if discover:
+            with self.source.connection_observation():
                 if cancelled is None:
-                    folders = self.source.fetch_collections(
-                        expected_account_ref=account.public()["account_ref"], limit=limit
-                    )
+                    account = self.source.account(interactive=interactive, timeout=timeout)
                 else:
-                    folders = self.source.fetch_collections(
-                        expected_account_ref=account.public()["account_ref"], limit=limit, cancelled=cancelled
+                    account = self.source.account(
+                        interactive=interactive, timeout=timeout, cancelled=cancelled
                     )
-            DouyinBrowserSource._cancel(cancelled)
+                # Publish the actual account result immediately. A slow/failed optional
+                # folder page must not hide an already successful login from the UI.
+                before = self.catalog.record(account, expected_version=before)["version"]
+                folders = None
+                if discover:
+                    if cancelled is None:
+                        folders = self.source.fetch_collections(
+                            expected_account_ref=account.public()["account_ref"], limit=limit
+                        )
+                    else:
+                        folders = self.source.fetch_collections(
+                            expected_account_ref=account.public()["account_ref"],
+                            limit=limit,
+                            cancelled=cancelled,
+                        )
+                DouyinBrowserSource._cancel(cancelled)
         except ContextError as error:
-            self.catalog.record(None, expected_version=before, error_code=error.code)
+            if discover and account is not None and error.code in FOLDER_ERRORS:
+                return self.catalog.record(account, expected_version=before, error_code=error.code)
+            if error.code in LOGIN_FAILURES:
+                self.catalog.record(None, expected_version=before, error_code=error.code)
             raise
         return self.catalog.record(account, expected_version=before, folders=folders)
